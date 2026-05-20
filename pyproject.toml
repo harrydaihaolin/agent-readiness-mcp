@@ -12,7 +12,10 @@ license = { text = "MIT" }
 authors = [{ name = "Harry Dai" }]
 keywords = ["mcp", "agents", "agent-readiness", "claude", "cursor"]
 dependencies = [
-    "agent-readiness>=2.3.0",
+    # 2.4.0 is the engine release that ships the apply_action module
+    # and the `scan --apply-top-action [--verify]` CLI flags both
+    # `apply_top_action` and the dogfood workflow depend on.
+    "agent-readiness>=2.4.0",
     "mcp>=1.0.0",
 ]
 
