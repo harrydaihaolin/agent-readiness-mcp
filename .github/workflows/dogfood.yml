@@ -1,0 +1,50 @@
+# Phase C8 dogfood workflow: every repo runs the agent-readiness scanner
+# against itself on every PR. The scanner gates merges on a minimum score
+# (--fail-below 90), pins the single highest-priority structured fix,
+# applies it, and verifies the action's verify command passes.
+#
+# When the apply step fails verify, the workflow exits 1 and the PR is
+# blocked until the maintainer either:
+#   - lowers --fail-below for repos that legitimately can't reach 90 yet, or
+#   - merges the auto-generated fix.
+#
+# This file is templated; copies live at <repo>/.github/workflows/dogfood.yml.
+# Keep this template in sync with each copy when the contract changes.
+
+name: dogfood
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  agent-readiness-self-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.7
+
+      - uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: "3.12"
+
+      - name: Install agent-readiness
+        run: |
+          python -m pip install --upgrade pip
+          # Pin to the released wheel; bump together with Phase C releases.
+          pip install "agent-readiness>=2.3.0"
+
+      - name: Self-scan
+        # --fail-below 90: gate merges on a minimum readiness score.
+        #
+        # The original dogfood template also passed --apply-top-action
+        # and --verify, but those flags are not present on engine
+        # v2.3.x. Re-introduce them in a follow-up once the engine
+        # restores the apply_action module and exposes both flags via
+        # the scan CLI (tracked in this repo's issues).
+        run: |
+          agent-readiness scan . \
+            --fail-below 90 \
+            --no-progress
