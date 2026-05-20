@@ -38,20 +38,34 @@ jobs:
           # workflow depends on.
           pip install "agent-readiness>=2.4.0"
 
-      - name: Self-scan
+      - name: Self-scan (score gate)
         # --fail-below 75: realistic floor for the initial v0.1.0 cut.
         # Per-pillar scores already sit at 90-97, but the overall
         # weighting pulls to 75 because this package doesn't ship a
         # gitleaks config, secrets baseline, or coverage report yet.
         # Raise the floor in lockstep with each safety / feedback
         # addition (5-point increments are typical).
-        # --apply-top-action: land the single highest-priority structured
-        # fix the engine pins.
-        # --verify: run the action's verify command after applying.
-        #   If verify fails, the workflow exits 1 and the PR is blocked.
+        #
+        # This step is the PR blocker. Score regression below 75 fails
+        # the workflow.
         run: |
           agent-readiness scan . \
             --fail-below 75 \
+            --no-progress
+
+      - name: Apply top action (best-effort)
+        # Exercises engine v2.4.0's apply_action + verify loop on every
+        # PR. Best-effort because the rule chosen as the top_action may
+        # render a run_command whose template isn't portable to this
+        # CI image (e.g. `package_manager install --frozen-lockfile
+        # {lock_file}` when the probe didn't resolve package_manager).
+        # That's a rule-quality issue tracked upstream; surfacing the
+        # failure here is informative but shouldn't block the PR — the
+        # score gate above already enforces the readiness contract.
+        if: success()
+        continue-on-error: true
+        run: |
+          agent-readiness scan . \
             --apply-top-action \
             --verify \
             --no-progress
