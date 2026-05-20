@@ -31,21 +31,15 @@ def test_scan_repo_rejects_nonexistent_path():
         scan_repo("/this/path/does/not/exist/xyz")
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Blocked on agent-readiness engine restoring the apply_action "
-        "module; tracked in the engine repo (apply_action.py is "
-        "currently missing from src/agent_readiness/). Re-enable once "
-        "the engine ships apply_action again."
-    ),
-    raises=ModuleNotFoundError,
-    strict=True,
-)
 def test_apply_top_action_returns_result_envelope():
     """apply_top_action returns the ApplyResult envelope; we don't
     assert ``applied=True`` because the actual behaviour depends on
-    which rule wins the pin (some win with run_command actions that
-    don't write any files)."""
+    which rule wins the pin (some win with run_command actions whose
+    shell command intentionally fails on a bare repo).
+
+    Requires ``agent-readiness >= 2.4.0`` (the engine release that
+    ships the ``apply_action`` module). On earlier engines the import
+    raises ``ModuleNotFoundError``."""
     with TemporaryDirectory() as td:
         repo = Path(td)
         (repo / "README.md").write_text("# repo\n")

@@ -78,7 +78,14 @@ def apply_top_action(path: str, run_verify: bool = True) -> dict[str, Any]:
     report = scan_repo(path)
     top = report.get("top_action")
     result = _apply_top_action(top, Path(path).expanduser().resolve(), run_verify=run_verify)
-    return result.to_dict()
+    out = result.to_dict()
+    # The engine's ApplyResult.to_dict() strips None/empty fields for
+    # cleanliness, but MCP clients want a stable envelope. Default the
+    # two primary outcome fields so consumers can read them
+    # unconditionally.
+    out.setdefault("applied", False)
+    out.setdefault("written", [])
+    return out
 
 
 def list_friction(path: str) -> list[dict[str, Any]]:
