@@ -4,18 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-readiness-mcp"
-version = "0.1.0"
-description = "MCP server exposing agent-readiness scan_repo and apply_top_action tools to coding agents."
+version = "0.2.0"
+description = "MCP server exposing agent-readiness scan, detect, and apply tools to coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Harry Dai" }]
 keywords = ["mcp", "agents", "agent-readiness", "claude", "cursor"]
 dependencies = [
-    # 2.4.0 is the engine release that ships the apply_action module
-    # and the `scan --apply-top-action [--verify]` CLI flags both
-    # `apply_top_action` and the dogfood workflow depend on.
-    "agent-readiness>=2.4.0",
+    # 2.5.0 is the engine release that ships the workspace_detect
+    # module + the detect_v1 envelope. detect_workspace and
+    # scan_workspace import directly from that module; scan_repo
+    # surfaces its structured `multi_repo_workspace` error.
+    "agent-readiness>=2.5.0",
     "mcp>=1.0.0",
 ]
 
