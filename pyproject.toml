@@ -16,7 +16,7 @@ dependencies = [
     # module + the detect_v1 envelope. detect_workspace and
     # scan_workspace import directly from that module; scan_repo
     # surfaces its structured `multi_repo_workspace` error.
-    "agent-readiness>=2.5.0",
+    "agent-readiness>=2.6.0",
     "mcp>=1.0.0",
 ]
 
