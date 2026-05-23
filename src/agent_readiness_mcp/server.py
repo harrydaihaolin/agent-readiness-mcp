@@ -1,13 +1,15 @@
 """MCP server core.
 
-The server exposes five tools backed by the agent-readiness engine:
+The server exposes seven tools backed by the agent-readiness engine:
 
-* ``detect_workspace(path)``          -> detect_v1 envelope
-* ``scan_workspace(path, select)``    -> multi-repo scan envelope
-* ``scan_repo(path)``                 -> ReadinessReport JSON envelope
-* ``apply_top_action(path, verify)``  -> ApplyResult JSON envelope
-* ``list_friction(path)``             -> list of {rule_id, severity,
-                                         message, fix_prompt, verify}
+* ``detect_workspace(path)``               -> detect_v1 envelope
+* ``enumerate_workspace(path)``            -> static enumeration envelope
+* ``scan_workspace(path, select)``         -> multi-repo scan envelope
+* ``check_workspace_readiness(path, sel)`` -> workspace_readiness envelope
+* ``scan_repo(path)``                      -> ReadinessReport JSON envelope
+* ``apply_top_action(path, verify)``       -> ApplyResult JSON envelope
+* ``list_friction(path)``                  -> list of {rule_id, severity,
+                                              message, fix_prompt, verify}
 
 ``detect_workspace`` and ``scan_workspace`` ship in v0.2.0 alongside
 agent-readiness 2.5.0's workspace-detection module. ``scan_repo`` was
@@ -73,6 +75,62 @@ def detect_workspace(path: str) -> dict[str, Any]:
     if not repo.is_dir():
         raise ValueError(f"path is not a directory: {repo}")
     return detect(repo).to_dict()
+
+
+def enumerate_workspace(path: str) -> dict[str, Any]:
+    """Static depth-1 enumeration of ``path`` for workspace classification.
+
+    Returns the ``EnumerationReport`` envelope as a dict. The skill consumes
+    this and decides (in the LLM step) whether ``path`` is a single repo,
+    monorepo, or workspace of independents — call ``scan_repo`` or
+    ``check_workspace_readiness`` accordingly.
+
+    Unlike :func:`detect_workspace`, this tool does NOT classify. It
+    returns raw structure; classification is the LLM's job. Use this
+    when the static signals (``detect_workspace``) aren't enough and
+    the caller needs a richer view of the tree.
+    """
+    from agent_readiness.enumerate import enumerate_workspace as _enumerate
+
+    p = Path(path).expanduser().resolve()
+    if not p.is_dir():
+        raise ValueError(f"path is not a directory: {p}")
+    return _enumerate(p).to_dict()
+
+
+def check_workspace_readiness(
+    path: str,
+    children_paths: list[str],
+) -> dict[str, Any]:
+    """Workspace-level readiness scan.
+
+    Runs the Coordination pack at ``path`` and the per-repo scan on
+    each ``children_paths`` entry. Returns the 5-pillar workspace
+    envelope (Coordination is workspace-only; the other four are
+    aggregated from the children).
+
+    ``children_paths`` is the caller's classification output — the
+    LLM decided who belongs to this workspace, and the tool trusts
+    that decision (it does not re-enumerate). Raises ``ValueError``
+    if ``children_paths`` is empty: the skill should classify before
+    calling this tool.
+    """
+    from agent_readiness.workspace_scan import scan as _scan
+
+    root = Path(path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"path is not a directory: {root}")
+
+    children: list[Path] = []
+    for c in children_paths:
+        cp = Path(c).expanduser()
+        if not cp.is_absolute():
+            cp = (root / cp).resolve()
+        else:
+            cp = cp.resolve()
+        children.append(cp)
+
+    return _scan(root, children).to_dict()
 
 
 def scan_repo(path: str) -> dict[str, Any]:
@@ -322,6 +380,36 @@ def serve(transport: str = "stdio") -> None:
         return json.dumps(detect_workspace(path), indent=2)
 
     @server.tool()
+    def enumerate_workspace_tool(path: str) -> str:
+        """Enumerate PATH's direct children for workspace classification.
+
+        Returns the ``EnumerationReport`` JSON envelope. Use this before
+        any scan call when PATH is unfamiliar — the LLM classifies the
+        result and decides whether to call ``scan_repo_tool`` (single
+        repo / monorepo) or ``check_workspace_readiness_tool``
+        (workspace).
+        """
+        return json.dumps(enumerate_workspace(path), indent=2)
+
+    @server.tool()
+    def check_workspace_readiness_tool(
+        path: str,
+        children_paths: list[str],
+    ) -> str:
+        """Workspace-level readiness scan.
+
+        Runs Coordination checks at PATH and per-repo scans on each
+        child. Returns the 5-pillar ``WorkspaceReadinessReport`` JSON
+        envelope. Call ``enumerate_workspace_tool`` first to discover
+        children; the LLM classifies which paths to include here.
+        """
+        try:
+            envelope = check_workspace_readiness(path, children_paths)
+        except ValueError as exc:
+            return json.dumps({"error": "invalid_input", "message": str(exc)})
+        return json.dumps(envelope, indent=2)
+
+    @server.tool()
     def scan_workspace_tool(
         path: str,
         select: list[str] | None = None,
@@ -377,7 +465,9 @@ def serve(transport: str = "stdio") -> None:
 __all__ = [
     "MultiRepoWorkspaceError",
     "apply_top_action",
+    "check_workspace_readiness",
     "detect_workspace",
+    "enumerate_workspace",
     "list_friction",
     "scan_repo",
     "scan_workspace",
