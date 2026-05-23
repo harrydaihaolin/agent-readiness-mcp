@@ -3,15 +3,37 @@
 These tests assert that the MCP tool returns the same JSON envelope as
 the CLI's --json output — the byte-identity contract per the
 CLI -> MCP -> Skills layering principle.
+
+The tests skip when the installed ``agent-readiness`` wheel predates
+the workspace-scan modules (``agent_readiness.enumerate`` and
+``agent_readiness.workspace_scan``). The engine release that ships
+those modules cascades to this repo via the version pin in
+``pyproject.toml`` — see AGENTS.md on dependency-ordered rollouts.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from agent_readiness_mcp.server import enumerate_workspace
+
+_ENGINE_HAS_WORKSPACE_SCAN = (
+    importlib.util.find_spec("agent_readiness.enumerate") is not None
+    and importlib.util.find_spec("agent_readiness.workspace_scan") is not None
+)
+
+pytestmark = pytest.mark.skipif(
+    not _ENGINE_HAS_WORKSPACE_SCAN,
+    reason=(
+        "installed agent-readiness wheel predates the workspace-scan "
+        "modules; tests run once the engine release cascades."
+    ),
+)
 
 
 def _make_git(p: Path) -> None:
