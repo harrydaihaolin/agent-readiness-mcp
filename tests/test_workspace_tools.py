@@ -64,3 +64,55 @@ def test_enumerate_rejects_non_directory(tmp_path: Path) -> None:
     except (ValueError, NotADirectoryError):
         return
     raise AssertionError("expected an error for non-directory input")
+
+
+# --- check_workspace_readiness ----------------------------------------
+
+from agent_readiness_mcp.server import check_workspace_readiness  # noqa: E402
+
+
+def test_check_workspace_readiness_empty_children_raises(tmp_path: Path) -> None:
+    try:
+        check_workspace_readiness(str(tmp_path), [])
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for empty children_paths")
+
+
+def test_check_workspace_readiness_returns_envelope(tmp_path: Path) -> None:
+    _make_git(tmp_path / "a")
+    (tmp_path / "a" / "README.md").write_text("# a")
+    result = check_workspace_readiness(str(tmp_path), [str(tmp_path / "a")])
+    assert result["kind"] == "workspace_readiness"
+    assert result["schema"] == 1
+    pillar_names = {p["pillar"] for p in result["pillars"]}
+    assert "coordination" in pillar_names
+
+
+def test_workspace_mcp_matches_cli_json(tmp_path: Path) -> None:
+    """MCP envelope must equal CLI --json for the same input."""
+    _make_git(tmp_path / "a")
+    (tmp_path / "a" / "README.md").write_text("# a")
+
+    mcp_envelope = check_workspace_readiness(str(tmp_path), [str(tmp_path / "a")])
+
+    engine_src = (
+        Path(__file__).resolve().parents[2]
+        / "agent-readiness" / "src"
+    )
+    env = os.environ.copy()
+    py_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{engine_src}:{py_path}" if py_path else str(engine_src)
+    )
+    cli_output = subprocess.run(
+        ["python3", "-m", "agent_readiness.cli", "workspace-scan",
+         str(tmp_path), f"--children={tmp_path}/a", "--json"],
+        check=True, capture_output=True, text=True, env=env,
+    )
+    cli_envelope = json.loads(cli_output.stdout)
+
+    # scan_duration_ms is timing-sensitive.
+    mcp_envelope["stats"].pop("scan_duration_ms", None)
+    cli_envelope["stats"].pop("scan_duration_ms", None)
+    assert mcp_envelope == cli_envelope

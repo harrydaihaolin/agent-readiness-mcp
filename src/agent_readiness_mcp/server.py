@@ -98,6 +98,41 @@ def enumerate_workspace(path: str) -> dict[str, Any]:
     return _enumerate(p).to_dict()
 
 
+def check_workspace_readiness(
+    path: str,
+    children_paths: list[str],
+) -> dict[str, Any]:
+    """Workspace-level readiness scan.
+
+    Runs the Coordination pack at ``path`` and the per-repo scan on
+    each ``children_paths`` entry. Returns the 5-pillar workspace
+    envelope (Coordination is workspace-only; the other four are
+    aggregated from the children).
+
+    ``children_paths`` is the caller's classification output — the
+    LLM decided who belongs to this workspace, and the tool trusts
+    that decision (it does not re-enumerate). Raises ``ValueError``
+    if ``children_paths`` is empty: the skill should classify before
+    calling this tool.
+    """
+    from agent_readiness.workspace_scan import scan as _scan
+
+    root = Path(path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"path is not a directory: {root}")
+
+    children: list[Path] = []
+    for c in children_paths:
+        cp = Path(c).expanduser()
+        if not cp.is_absolute():
+            cp = (root / cp).resolve()
+        else:
+            cp = cp.resolve()
+        children.append(cp)
+
+    return _scan(root, children).to_dict()
+
+
 def scan_repo(path: str) -> dict[str, Any]:
     """Scan ``path`` and return the JSON-serialisable readiness report.
 
@@ -357,6 +392,24 @@ def serve(transport: str = "stdio") -> None:
         return json.dumps(enumerate_workspace(path), indent=2)
 
     @server.tool()
+    def check_workspace_readiness_tool(
+        path: str,
+        children_paths: list[str],
+    ) -> str:
+        """Workspace-level readiness scan.
+
+        Runs Coordination checks at PATH and per-repo scans on each
+        child. Returns the 5-pillar ``WorkspaceReadinessReport`` JSON
+        envelope. Call ``enumerate_workspace_tool`` first to discover
+        children; the LLM classifies which paths to include here.
+        """
+        try:
+            envelope = check_workspace_readiness(path, children_paths)
+        except ValueError as exc:
+            return json.dumps({"error": "invalid_input", "message": str(exc)})
+        return json.dumps(envelope, indent=2)
+
+    @server.tool()
     def scan_workspace_tool(
         path: str,
         select: list[str] | None = None,
@@ -412,6 +465,7 @@ def serve(transport: str = "stdio") -> None:
 __all__ = [
     "MultiRepoWorkspaceError",
     "apply_top_action",
+    "check_workspace_readiness",
     "detect_workspace",
     "enumerate_workspace",
     "list_friction",
