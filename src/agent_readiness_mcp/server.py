@@ -1,6 +1,6 @@
 """MCP server core.
 
-The server exposes seven tools backed by the agent-readiness engine:
+The server exposes eight tools backed by the agent-readiness engine:
 
 * ``detect_workspace(path)``               -> detect_v1 envelope
 * ``enumerate_workspace(path)``            -> static enumeration envelope
@@ -10,6 +10,9 @@ The server exposes seven tools backed by the agent-readiness engine:
 * ``apply_top_action(path, verify)``       -> ApplyResult JSON envelope
 * ``list_friction(path)``                  -> list of {rule_id, severity,
                                               message, fix_prompt, verify}
+* ``manifest_validate(path)``              -> ManifestValidationResult
+                                              JSON envelope (workspace
+                                              bible loader + validator)
 
 ``detect_workspace`` and ``scan_workspace`` ship in v0.2.0 alongside
 agent-readiness 2.5.0's workspace-detection module. ``scan_repo`` was
@@ -348,6 +351,51 @@ def list_friction(path: str) -> list[dict[str, Any]]:
     return items
 
 
+def manifest_validate(path: str = ".") -> dict[str, Any]:
+    """Validate an agent-readiness manifest directory.
+
+    Returns the ManifestValidationResult JSON envelope (byte-identical
+    to ``agent-readiness manifest validate <path> --json``). On unexpected
+    failures (e.g. import errors when the engine wheel is missing) the
+    function still returns a well-formed envelope with ``valid: false``
+    and the underlying exception text in the issues list, so callers
+    never see a stack trace.
+    """
+    try:
+        from agent_readiness.manifest import validate_manifest_dir
+    except ImportError as exc:
+        return {
+            "apiVersion": "agent-readiness.io/v1",
+            "kind": "ManifestValidationResult",
+            "summary": {
+                "valid": False, "manifest_name": "",
+                "errors": 1, "warnings": 0, "infos": 0,
+            },
+            "issues": [{
+                "severity": "error",
+                "message": f"agent_readiness.manifest unavailable: {exc}",
+                "location": path,
+            }],
+        }
+    try:
+        result = validate_manifest_dir(Path(path))
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "apiVersion": "agent-readiness.io/v1",
+            "kind": "ManifestValidationResult",
+            "summary": {
+                "valid": False, "manifest_name": "",
+                "errors": 1, "warnings": 0, "infos": 0,
+            },
+            "issues": [{
+                "severity": "error",
+                "message": str(exc),
+                "location": path,
+            }],
+        }
+    return result.to_json_envelope()
+
+
 # ---------- MCP transport layer -------------------------------------------
 
 
@@ -457,6 +505,18 @@ def serve(transport: str = "stdio") -> None:
         """
         return json.dumps(list_friction(path), indent=2)
 
+    @server.tool()
+    def manifest_validate_tool(path: str = ".") -> str:
+        """Validate an agent-readiness manifest directory.
+
+        Returns the ManifestValidationResult JSON envelope —
+        byte-identical to ``agent-readiness manifest validate <path>
+        --json``. Use when the caller hands you the path to a workspace
+        bible directory and wants schema + semantic checks (declared-tag
+        axes, arch-rule id-vs-filename prefix).
+        """
+        return json.dumps(manifest_validate(path), indent=2)
+
     if transport != "stdio":
         raise ValueError(f"unsupported transport: {transport!r}")
     server.run()
@@ -469,6 +529,7 @@ __all__ = [
     "detect_workspace",
     "enumerate_workspace",
     "list_friction",
+    "manifest_validate",
     "scan_repo",
     "scan_workspace",
     "serve",
