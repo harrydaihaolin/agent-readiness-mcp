@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-readiness-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP server exposing agent-readiness scan, detect, and apply tools to coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ dependencies = [
     # module + the detect_v1 envelope. detect_workspace and
     # scan_workspace import directly from that module; scan_repo
     # surfaces its structured `multi_repo_workspace` error.
-    "agent-readiness>=2.6.0",
+    "agent-readiness>=2.7.0",
     "mcp>=1.0.0",
 ]
 
