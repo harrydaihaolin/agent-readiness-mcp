@@ -396,6 +396,27 @@ def manifest_validate(path: str = ".") -> dict[str, Any]:
     return result.to_json_envelope()
 
 
+def ontology(subcmd: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Passthrough to the agent-readiness-ontology-mcp server tools.
+
+    Lets a skill user install only ``agent-readiness-mcp`` and still reach
+    the ontology bootstrap (and later runtime) tools.
+
+    ``subcmd`` is one of the tool names registered in
+    :mod:`agent_readiness_ontology_mcp.server`. ``arguments`` is forwarded
+    as keyword args to that tool.
+    """
+    from agent_readiness_ontology_mcp.server import TOOL_REGISTRY
+
+    if subcmd not in TOOL_REGISTRY:
+        raise ValueError(
+            f"Unknown ontology subcmd: {subcmd!r}. "
+            f"Known: {sorted(TOOL_REGISTRY)}"
+        )
+    args = arguments or {}
+    return TOOL_REGISTRY[subcmd](**args)
+
+
 # ---------- MCP transport layer -------------------------------------------
 
 
@@ -517,6 +538,16 @@ def serve(transport: str = "stdio") -> None:
         """
         return json.dumps(manifest_validate(path), indent=2)
 
+    @server.tool()
+    def ontology_tool(subcmd: str, arguments: dict[str, Any] | None = None) -> str:
+        """Passthrough to agent-readiness-ontology-mcp tools.
+
+        ``subcmd`` is one of the bootstrap tool names (e.g.
+        ``bootstrap_init``). ``arguments`` is forwarded as keyword args
+        to that tool.
+        """
+        return json.dumps(ontology(subcmd, arguments=arguments), indent=2)
+
     if transport != "stdio":
         raise ValueError(f"unsupported transport: {transport!r}")
     server.run()
@@ -530,6 +561,7 @@ __all__ = [
     "enumerate_workspace",
     "list_friction",
     "manifest_validate",
+    "ontology",
     "scan_repo",
     "scan_workspace",
     "serve",

@@ -17,6 +17,7 @@ dependencies = [
     # scan_workspace import directly from that module; scan_repo
     # surfaces its structured `multi_repo_workspace` error.
     "agent-readiness>=2.7.0",
+    "agent-readiness-ontology-mcp>=0.1.0",
     "mcp>=1.0.0",
 ]
 
