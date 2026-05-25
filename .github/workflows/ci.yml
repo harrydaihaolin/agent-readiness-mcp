@@ -14,5 +14,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      # Install agent-readiness from the Plan 1 source branch until 3.1.0
+      # ships on PyPI. The wheel published as 3.0.4 does not yet include
+      # the `live_scan` package these tests exercise.
+      # TODO(plan3-merge): drop this line and bump the pyproject lower
+      # bound to >=3.1.0 once the release is cut.
+      - run: pip install "agent-readiness@git+https://github.com/harrydaihaolin/agent-readiness@main" --upgrade
       - run: ruff check .
       - run: python -m pytest tests/
