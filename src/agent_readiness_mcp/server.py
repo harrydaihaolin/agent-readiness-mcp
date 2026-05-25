@@ -409,8 +409,17 @@ def ontology(subcmd: str, arguments: dict[str, Any] | None = None) -> dict[str, 
     ``subcmd`` is one of the tool names registered in
     :mod:`agent_readiness_ontology_mcp.server`. ``arguments`` is forwarded
     as keyword args to that tool.
+
+    ``agent-readiness-ontology-mcp`` is a soft extra; install with
+    ``pip install agent-readiness-mcp[ontology]`` to enable this tool.
     """
-    from agent_readiness_ontology_mcp.server import TOOL_REGISTRY
+    try:
+        from agent_readiness_ontology_mcp.server import TOOL_REGISTRY
+    except ImportError as exc:
+        raise ImportError(
+            "ontology passthrough requires the optional "
+            "'ontology' extra: pip install agent-readiness-mcp[ontology]"
+        ) from exc
 
     if subcmd not in TOOL_REGISTRY:
         raise ValueError(

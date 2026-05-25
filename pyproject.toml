@@ -21,11 +21,17 @@ dependencies = [
     # CLI commands that the live-scan tools wrap. Will be bumped to
     # >=3.1.0 once that release ships.
     "agent-readiness>=3.0.4",
-    "agent-readiness-ontology-mcp>=0.1.0",
     "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
+# Ontology passthrough is a soft extra so the base wheel installs even
+# when ``agent-readiness-ontology-mcp`` is not yet on PyPI. The
+# ontology() function lazy-imports it at call time and surfaces a clean
+# ImportError if the extra wasn't installed.
+ontology = [
+    "agent-readiness-ontology-mcp>=0.1.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
