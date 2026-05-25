@@ -13,7 +13,6 @@ def test_passthrough_rejects_unknown_subcmd():
 
 def test_passthrough_lists_known_subcmds(tmp_path):
     """Smoke: invoking bootstrap_init via passthrough returns a dict."""
-    from agent_readiness_mcp.server import ontology
 
     template = (
         "/Users/haolin.dai/Documents/agent-readiness_project/"

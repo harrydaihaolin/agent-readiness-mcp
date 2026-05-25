@@ -47,6 +47,10 @@ Implementation notes:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -417,6 +421,205 @@ def ontology(subcmd: str, arguments: dict[str, Any] | None = None) -> dict[str, 
     return TOOL_REGISTRY[subcmd](**args)
 
 
+# ---------- live scan tools (Plan 3) --------------------------------------
+
+
+def scan_workspace_async(
+    workspace_path: str,
+    children: list[str] | None = None,
+    *,
+    server_url_timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    """Kick off ``agent-readiness scan-and-view`` as a detached subprocess.
+
+    Returns a ``StartedScan`` envelope as soon as ``<scan-dir>/server.url``
+    appears on disk (the CLI writes it once the HTTP server is listening).
+    The CLI process then runs the scan independently of the MCP process.
+
+    If a live scan already exists for ``workspace_path`` (PID-stamp
+    verified), returns *that* scan's URL instead of starting a new one.
+    """
+    from agent_readiness.live_scan.paths import scan_dir
+    from agent_readiness.live_scan.pidfile import PidStatus, verify_pidfile
+
+    ws = Path(workspace_path).expanduser().resolve()
+    if not ws.is_dir():
+        raise ValueError(f"path is not a directory: {ws}")
+    sd = scan_dir(ws)
+    url_file = sd / "server.url"
+    pid_file = sd / "daemon.pid"
+
+    if verify_pidfile(pid_file) is PidStatus.LIVE and url_file.exists():
+        return _started_envelope(ws, sd, url_file, pid_file)
+
+    children = children or [str(ws)]
+    cmd = [
+        sys.executable, "-m", "agent_readiness.cli", "scan-and-view",
+        str(ws), "--children", ",".join(children), "--no-open",
+    ]
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    deadline = _time.monotonic() + server_url_timeout_s
+    while _time.monotonic() < deadline:
+        if url_file.exists() and pid_file.exists():
+            return _started_envelope(ws, sd, url_file, pid_file)
+        _time.sleep(0.1)
+    raise RuntimeError(
+        f"scan-and-view did not write {url_file} within {server_url_timeout_s}s"
+    )
+
+
+def _started_envelope(
+    ws: Path, sd: Path, url_file: Path, pid_file: Path,
+) -> dict[str, Any]:
+    pid_data = json.loads(pid_file.read_text())
+    live = sd / "live.json"
+    children_total = 0
+    if live.exists():
+        try:
+            children_total = json.loads(live.read_text())["progress"]["total"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return {
+        "status": "started",
+        "dashboard_url": url_file.read_text().strip(),
+        "scan_id": pid_data["scan_id"],
+        "workspace": str(ws),
+        "children_total": children_total,
+        "eta_minutes_estimate": max(1, children_total * 30 // 60),
+        "pid": pid_data["pid"],
+        "log_tail_file": str(sd / "scan.log"),
+        "guidance": (
+            "Share dashboard_url with the user. "
+            "Poll get_scan_status before reading final results."
+        ),
+    }
+
+
+def get_scan_status(scan_id: str) -> dict[str, Any]:
+    """Return current status for a scan by ``scan_id`` (workspace hash).
+
+    Reads ``live.json`` if present, else ``latest.json``. Cheap and safe
+    to call repeatedly. Returns the dashboard URL when the local server
+    is still running; empty string otherwise.
+    """
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / scan_id
+    live = sd / "live.json"
+    latest = sd / "latest.json"
+    target = live if live.exists() else latest if latest.exists() else None
+    if target is None:
+        raise FileNotFoundError(f"no scan data for {scan_id}")
+    env = json.loads(target.read_text())
+    url = ""
+    url_file = sd / "server.url"
+    if url_file.exists():
+        url = url_file.read_text().strip()
+    return {
+        "scan_id": scan_id,
+        "status": env.get("status"),
+        "progress": env.get("progress"),
+        "dashboard_url": url,
+        "overall_score": env.get("overall_score"),
+        "completed_at": env.get("completed_at"),
+    }
+
+
+def stop_scan(scan_id: str) -> dict[str, Any]:
+    """Stop a running scan by ``scan_id``, or every scan when ``scan_id="all"``.
+
+    Returns ``{"ok": bool, "killed": [...], "skipped": [...]}``. ``ok=False``
+    only when a specific scan_id can't be found or its pidfile is
+    stale/recycled — never when ``scan_id="all"``.
+    """
+    import signal as _sig
+
+    from agent_readiness.live_scan import discovery as _discovery
+    from agent_readiness.live_scan.paths import scans_root
+    from agent_readiness.live_scan.pidfile import (
+        PidStatus,
+        clear_pidfile,
+        verify_pidfile,
+    )
+
+    if scan_id == "all":
+        result = _discovery.stop_all()
+        return {"ok": True, **result}
+
+    sd = scans_root() / scan_id
+    pid_file = sd / "daemon.pid"
+    status = verify_pidfile(pid_file)
+    if status is PidStatus.MISSING:
+        return {
+            "ok": False,
+            "reason": "not_found",
+            "killed": [],
+            "skipped": [],
+        }
+    if status is PidStatus.LIVE:
+        data = json.loads(pid_file.read_text())
+        try:
+            os.kill(data["pid"], _sig.SIGTERM)
+            return {"ok": True, "killed": [scan_id], "skipped": []}
+        except ProcessLookupError:
+            clear_pidfile(pid_file)
+            return {
+                "ok": False,
+                "reason": "process_disappeared",
+                "killed": [],
+                "skipped": [],
+            }
+    clear_pidfile(pid_file)
+    return {
+        "ok": False,
+        "reason": status.value,
+        "killed": [],
+        "skipped": [{"scan_id": scan_id, "reason": status.value}],
+    }
+
+
+def list_scans() -> dict[str, Any]:
+    """Enumerate active + recent scans across every workspace."""
+    from agent_readiness.live_scan import discovery as _discovery
+    return _discovery.list_scans()
+
+
+def render_workspace_report(
+    workspace_path: str,
+    scan_id: str | None = None,
+    output_dir: str | None = None,
+) -> dict[str, Any]:
+    """Render a scan as a portable static directory via agent_readiness.render."""
+    from agent_readiness.render import export_report
+
+    out = Path(output_dir).expanduser().resolve() if output_dir else None
+    result = export_report(
+        Path(workspace_path).expanduser().resolve(),
+        scan_id=scan_id,
+        output_dir=out,
+    )
+    return {
+        "status": "rendered",
+        "index_path": str(result.index_path),
+        "output_dir": str(result.output_dir),
+        "scan_id": result.scan_id,
+        "scan_ts": result.scan_ts,
+        "rendered_at": result.rendered_at,
+        "source_status": result.source_status,
+        "guidance": (
+            "Share index_path with the user. If file:// routing fails, "
+            "run `python -m http.server` in output_dir and open "
+            "http://localhost:8000."
+        ),
+    }
+
+
 # ---------- MCP transport layer -------------------------------------------
 
 
@@ -435,7 +638,8 @@ def serve(transport: str = "stdio") -> None:
             "pip install agent-readiness-mcp"
         ) from exc
 
-    server = FastMCP("agent-readiness")
+    injected = globals().get("_INJECTED_SERVER_FOR_TEST")
+    server = injected if injected is not None else FastMCP("agent-readiness")
 
     @server.tool()
     def detect_workspace_tool(path: str) -> str:
@@ -548,6 +752,70 @@ def serve(transport: str = "stdio") -> None:
         """
         return json.dumps(ontology(subcmd, arguments=arguments), indent=2)
 
+    # ----- Plan 3: live-scan tools ---------------------------------------
+
+    @server.tool()
+    def scan_workspace_async_tool(
+        workspace_path: str,
+        children: list[str] | None = None,
+    ) -> str:
+        """Kick off a live workspace scan + serve dashboard, return URL immediately.
+
+        Spawns ``agent-readiness scan-and-view`` as a detached subprocess.
+        Returns within ~2s with a JSON envelope containing ``dashboard_url``.
+        Agent should share that URL with the user, then poll
+        ``get_scan_status_tool`` before reading final results.
+
+        If a live scan already exists for ``workspace_path``, returns
+        that scan's URL instead of starting a new one.
+        """
+        try:
+            return json.dumps(
+                scan_workspace_async(workspace_path, children=children),
+                indent=2,
+            )
+        except (ValueError, RuntimeError) as exc:
+            return json.dumps({"error": "scan_start_failed", "message": str(exc)})
+
+    @server.tool()
+    def get_scan_status_tool(scan_id: str) -> str:
+        """Return current status for a scan by ``scan_id`` (workspace hash)."""
+        try:
+            return json.dumps(get_scan_status(scan_id), indent=2)
+        except FileNotFoundError as exc:
+            return json.dumps({"error": "not_found", "message": str(exc)})
+
+    @server.tool()
+    def stop_scan_tool(scan_id: str) -> str:
+        """Stop one scan, or every running scan with ``scan_id='all'``."""
+        return json.dumps(stop_scan(scan_id), indent=2)
+
+    @server.tool()
+    def list_scans_tool() -> str:
+        """Enumerate active + recent scans across every workspace."""
+        return json.dumps(list_scans(), indent=2)
+
+    @server.tool()
+    def render_workspace_report_tool(
+        workspace_path: str,
+        scan_id: str | None = None,
+        output_dir: str | None = None,
+    ) -> str:
+        """Render a scan as a portable static directory (HTML + JSON)."""
+        try:
+            return json.dumps(
+                render_workspace_report(
+                    workspace_path,
+                    scan_id=scan_id,
+                    output_dir=output_dir,
+                ),
+                indent=2,
+            )
+        except FileNotFoundError as exc:
+            return json.dumps({"error": "not_found", "message": str(exc)})
+
+    if injected is not None:
+        return
     if transport != "stdio":
         raise ValueError(f"unsupported transport: {transport!r}")
     server.run()
@@ -559,10 +827,15 @@ __all__ = [
     "check_workspace_readiness",
     "detect_workspace",
     "enumerate_workspace",
+    "get_scan_status",
     "list_friction",
+    "list_scans",
     "manifest_validate",
     "ontology",
+    "render_workspace_report",
     "scan_repo",
     "scan_workspace",
+    "scan_workspace_async",
     "serve",
+    "stop_scan",
 ]
