@@ -20,7 +20,7 @@ dependencies = [
     # `scan-and-view`/`scan-status`/`scan-stop`/`scan-list`/`render-report`
     # CLI commands that the live-scan tools wrap. Will be bumped to
     # >=3.1.0 once that release ships.
-    "agent-readiness>=3.0.4",
+    "agent-readiness>=3.1.0",
     "mcp>=1.0.0",
 ]
 
