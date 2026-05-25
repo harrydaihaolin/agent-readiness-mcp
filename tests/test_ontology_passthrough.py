@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import pytest
 
+# Soft skip — ``agent_readiness_ontology_mcp`` is an optional extra
+# (``agent-readiness-mcp[ontology]``) and may not be installed in CI.
+pytest.importorskip("agent_readiness_ontology_mcp")
+
 
 def test_passthrough_rejects_unknown_subcmd():
     from agent_readiness_mcp.server import ontology
@@ -13,7 +17,6 @@ def test_passthrough_rejects_unknown_subcmd():
 
 def test_passthrough_lists_known_subcmds(tmp_path):
     """Smoke: invoking bootstrap_init via passthrough returns a dict."""
-    from agent_readiness_mcp.server import ontology
 
     template = (
         "/Users/haolin.dai/Documents/agent-readiness_project/"
