@@ -16,12 +16,14 @@ jobs:
       - run: pip install -e ".[dev]"
       # Install agent-readiness from the Plan 1 source branch until 3.1.0
       # ships on PyPI. The wheel published as 3.0.4 does not yet include
-      # the `live_scan` package these tests exercise. --force-reinstall +
-      # --no-deps because the published 3.0.4 wheel is already installed
-      # under the same version string and pip's normal resolver would
-      # treat it as satisfied.
+      # the `live_scan` package these tests exercise. --force-reinstall is
+      # required because the published 3.0.4 wheel is already installed
+      # under the same version string and pip's resolver would otherwise
+      # treat it as satisfied. We also pre-install psutil so the
+      # --no-deps-free reinstall does not race with transitive resolution.
       # TODO(plan3-merge): drop this step and bump the pyproject lower
       # bound to >=3.1.0 once the release is cut.
+      - run: pip install psutil
       - run: pip install --force-reinstall --no-deps "agent-readiness@git+https://github.com/harrydaihaolin/agent-readiness@main"
       - run: ruff check .
       - run: python -m pytest tests/
