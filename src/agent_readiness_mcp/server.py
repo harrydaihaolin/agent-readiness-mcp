@@ -54,6 +54,8 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
+from agent_readiness_mcp import gaps as _gaps
+
 
 class MultiRepoWorkspaceError(Exception):
     """Raised by ``scan_repo`` when the path is a multi-repo workspace.
@@ -725,8 +727,127 @@ def serve(transport: str = "stdio") -> None:
 
     @server.tool()
     def apply_top_action_tool(path: str, run_verify: bool = True) -> str:
-        """Apply the top_action pinned by a fresh scan of ``path``."""
+        """Apply the top_action pinned by a fresh scan of ``path``.
+
+        Note (v0.6.0): with the engine's per-rule confidence gating
+        (agent-readiness v3.2.0+), ``apply_top_action`` may return
+        ``{"confirm_required": true}`` (rule with confidence=medium)
+        or ``{"gap_payload": {...}}`` (rule with confidence=low) and
+        leave the working copy untouched. Pair with
+        ``confirm_apply_tool`` to round-trip the medium-confidence
+        case once the agent has user approval.
+        """
         return json.dumps(apply_top_action(path, run_verify=run_verify), indent=2)
+
+    # ----- Bundle B: gap-aware tools + ambiguity-refusing apply ----------
+
+    @server.tool()
+    def record_gap_tool(
+        path: str,
+        kind: str,
+        detail: str,
+        severity: str = "medium",
+        candidate_resolutions: list[str] | None = None,
+        agent_session: str | None = None,
+    ) -> str:
+        """Record a Gap the agent recognised but couldn't confidently resolve.
+
+        Writes to ``<path>/.agent-readiness/gaps.jsonl`` and surfaces
+        as a Finding on the next scan via ``ontology.gaps_unresolved``
+        until ``agent-readiness gap resolve <id>`` flips it.
+
+        Use when the agent considered multiple resolutions but couldn't
+        pick one with high confidence — recording a gap is preferable
+        to applying the wrong fix or silently dropping the question.
+        """
+        return json.dumps(
+            _gaps.record_gap(
+                path,
+                kind=kind,
+                detail=detail,
+                severity=severity,
+                candidate_resolutions=candidate_resolutions,
+                agent_session=agent_session,
+            ),
+            indent=2,
+        )
+
+    @server.tool()
+    def ask_clarification_tool(
+        path: str,
+        question: str,
+        options: list[str] | None = None,
+        context_path: str | None = None,
+        agent_session: str | None = None,
+    ) -> str:
+        """Surface a clarification question for a human reviewer (fire-and-forget).
+
+        Persists to ``.agent-readiness/gaps.jsonl`` alongside Gaps and
+        Assumptions, discriminated by ``kind="clarification"``. v1 is
+        non-blocking — the agent continues; the clarification is
+        visible via ``agent-readiness gap list --all``.
+        """
+        return json.dumps(
+            _gaps.ask_clarification(
+                path,
+                question=question,
+                options=options,
+                context_path=context_path,
+                agent_session=agent_session,
+            ),
+            indent=2,
+        )
+
+    @server.tool()
+    def log_assumption_tool(
+        path: str,
+        assumption: str,
+        justification: str,
+        expires_after: str | None = None,
+        agent_session: str | None = None,
+    ) -> str:
+        """Log an assumption the agent made so future agents can audit it.
+
+        Audit-only — assumptions don't cost score, but they surface in
+        ``agent-readiness gap list --all`` so a reviewer can rebut any
+        that no longer hold.
+        """
+        return json.dumps(
+            _gaps.log_assumption(
+                path,
+                assumption=assumption,
+                justification=justification,
+                expires_after=expires_after,
+                agent_session=agent_session,
+            ),
+            indent=2,
+        )
+
+    @server.tool()
+    def confirm_apply_tool(
+        path: str,
+        approved: bool,
+        run_verify: bool = True,
+        agent_session: str | None = None,
+    ) -> str:
+        """Round-trip the medium-confidence apply path with a user decision.
+
+        Use after ``apply_top_action_tool`` returns
+        ``{"confirm_required": true}``: ask the user, then call this
+        with ``approved=True`` to apply (forces confidence to high)
+        or ``approved=False`` to record a Gap (so the unresolved
+        ambiguity surfaces on the next scan via
+        ``ontology.gaps_unresolved``).
+        """
+        return json.dumps(
+            _gaps.confirm_apply(
+                path,
+                approved=approved,
+                run_verify=run_verify,
+                agent_session=agent_session,
+            ),
+            indent=2,
+        )
 
     @server.tool()
     def list_friction_tool(path: str) -> str:
@@ -847,4 +968,19 @@ __all__ = [
     "scan_workspace_async",
     "serve",
     "stop_scan",
+    # Bundle B (v0.6.0): gap-aware tools + ambiguity-refusing apply
+    # round-trip. Re-exported from agent_readiness_mcp.gaps.
+    "ask_clarification",
+    "confirm_apply",
+    "log_assumption",
+    "record_gap",
 ]
+
+
+# Re-export gap-aware wrappers at the package's module level so
+# downstream callers can ``from agent_readiness_mcp.server import
+# record_gap`` without having to know about the ``gaps`` submodule.
+ask_clarification = _gaps.ask_clarification
+confirm_apply = _gaps.confirm_apply
+log_assumption = _gaps.log_assumption
+record_gap = _gaps.record_gap
