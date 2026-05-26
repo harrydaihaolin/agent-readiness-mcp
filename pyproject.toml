@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-readiness-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server exposing agent-readiness scan, detect, and apply tools to coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,7 +20,7 @@ dependencies = [
     # `scan-and-view`/`scan-status`/`scan-stop`/`scan-list`/`render-report`
     # CLI commands that the live-scan tools wrap. Will be bumped to
     # >=3.1.0 once that release ships.
-    "agent-readiness>=3.1.0",
+    "agent-readiness>=3.2.0",
     "mcp>=1.0.0",
 ]
 
