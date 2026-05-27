@@ -751,9 +751,25 @@ def serve(transport: str = "stdio") -> None:
 
         Returns the ``EnumerationReport`` JSON envelope. Use this before
         any scan call when PATH is unfamiliar — the LLM classifies the
-        result and decides whether to call ``scan_repo_tool`` (single
-        repo / monorepo) or ``check_workspace_readiness_tool``
-        (workspace).
+        result and decides which scan tool to chain next:
+
+          - **single repo / monorepo** → ``scan_repo_tool`` (synchronous,
+            seconds).
+          - **multi-repo workspace (≥ 2 children with ``has_git=true``)**
+            → **``scan_workspace_async_tool`` (DEFAULT, recommended).**
+            Returns within ~2s with a live ``dashboard_url`` the user
+            opens in a browser; the chat stays free, per-repo progress
+            and interactive prompts stream to the dashboard. Poll
+            ``get_scan_status_tool`` once per chat turn.
+          - workspace **opt-out → headless** →
+            ``check_workspace_readiness_tool`` (SYNCHRONOUS — scans every
+            child sequentially, ≥ 30s per repo, blocks the chat for the
+            whole duration). Use only when the user explicitly refused
+            dashboard mode or when running headless in CI.
+
+        For any workspace with more than 2-3 repos, picking the sync
+        tool over the async one is almost always a bug: the chat hangs
+        for minutes while the user wonders what's happening.
         """
         return json.dumps(enumerate_workspace(path), indent=2)
 
@@ -762,12 +778,29 @@ def serve(transport: str = "stdio") -> None:
         path: str,
         children_paths: list[str],
     ) -> str:
-        """Workspace-level readiness scan.
+        """**SYNCHRONOUS workspace scan — blocks the chat for minutes.**
+        Prefer ``scan_workspace_async_tool`` for any workspace ≥ 2 repos.
 
         Runs Coordination checks at PATH and per-repo scans on each
-        child. Returns the 5-pillar ``WorkspaceReadinessReport`` JSON
-        envelope. Call ``enumerate_workspace_tool`` first to discover
-        children; the LLM classifies which paths to include here.
+        child sequentially (~30s per repo for a typical Python repo).
+        For a 10-repo workspace that is ~5 minutes of blocked chat;
+        for a 20-repo workspace, ~10 minutes. Returns the 5-pillar
+        ``WorkspaceReadinessReport`` JSON envelope when finally done.
+
+        Use this tool ONLY when:
+
+          - the user explicitly opted out of dashboard mode
+            (e.g. ``"don't open the dashboard, just give me the JSON"``),
+            OR
+          - running headless in CI (no human, no browser),
+            OR
+          - the workspace has 1-2 children and the user is fine waiting.
+
+        For every other multi-repo case, switch to
+        ``scan_workspace_async_tool`` — same scan engine, same
+        Coordination findings, but the chat doesn't block and prompts
+        are answered inline in the browser instead of stalling the
+        conversation.
         """
         try:
             envelope = check_workspace_readiness(path, children_paths)
@@ -971,15 +1004,44 @@ def serve(transport: str = "stdio") -> None:
         workspace_path: str,
         children: list[str] | None = None,
     ) -> str:
-        """Kick off a live workspace scan + serve dashboard, return URL immediately.
+        """**DEFAULT workspace scan tool — start here for any multi-repo path.**
 
-        Spawns ``agent-readiness scan-and-view`` as a detached subprocess.
-        Returns within ~2s with a JSON envelope containing ``dashboard_url``.
-        Agent should share that URL with the user, then poll
-        ``get_scan_status_tool`` before reading final results.
+        Spawns ``agent-readiness scan-and-view`` as a detached subprocess
+        and **returns within ~2 seconds** with a JSON envelope:
 
-        If a live scan already exists for ``workspace_path``, returns
-        that scan's URL instead of starting a new one.
+            {
+              "status": "started",
+              "scan_id": "<workspace_hash>",
+              "dashboard_url": "http://127.0.0.1:<port>/#/live/<scan_id>",
+              "children_total": N,
+              "eta_minutes_estimate": M,
+              ...
+            }
+
+        After this returns:
+
+          1. **Share ``dashboard_url`` with the user verbatim** so they
+             can open it in a browser. The browser shows the per-repo
+             grid, prompts queue, and findings feed updating live over
+             SSE — the user does not need to wait in chat.
+          2. **Tell the user how to exit dashboard mode** — they can
+             click *"Exit dashboard"* in the browser OR ask in chat
+             (which POSTs to the exit endpoint). The scan keeps running
+             either way.
+          3. **Stop calling tools.** Hand off. Don't poll
+             ``get_scan_status_tool`` in a loop — that's what the
+             dashboard is for. Call ``get_scan_status_tool`` **at most
+             once per chat turn**, only when the user sends a new
+             message.
+
+        Use this tool for any workspace with ≥ 2 children. Same scan
+        engine as ``check_workspace_readiness_tool`` but the chat
+        doesn't block and interactive prompts are answered in the
+        browser instead of stalling the conversation.
+
+        If a live scan already exists for ``workspace_path`` (verified
+        via daemon.pid), returns that scan's URL instead of starting a
+        new one.
         """
         try:
             return json.dumps(
@@ -991,7 +1053,25 @@ def serve(transport: str = "stdio") -> None:
 
     @server.tool()
     def get_scan_status_tool(scan_id: str) -> str:
-        """Return current status for a scan by ``scan_id`` (workspace hash)."""
+        """Cheap, non-blocking poll of a live or completed scan.
+
+        Returns the status envelope (``status``, ``progress``,
+        ``dashboard_url``, ``sse_url``, ``snapshot_url``,
+        ``prompts_pending_count``, ``mode_exit_requested``,
+        ``overall_score``). Safe to call repeatedly — but the contract
+        is **at most once per chat turn**, not in a polling loop. The
+        dashboard already shows live progress; this tool exists so the
+        agent can briefly answer "how's it going?" when the user asks.
+
+        Read the envelope and respond conversationally:
+
+          - ``status == "completed"`` → summarise + offer to apply.
+          - ``status == "running"`` → one-liner: "X of Y repos done".
+          - ``prompts_pending_count > 0`` → tell the user to answer
+            the pending prompts in the dashboard tab.
+          - ``mode_exit_requested == True`` → the user clicked Exit
+            Dashboard; revert to chat mode for the next response.
+        """
         try:
             return json.dumps(get_scan_status(scan_id), indent=2)
         except FileNotFoundError as exc:

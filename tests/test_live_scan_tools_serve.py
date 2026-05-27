@@ -80,3 +80,86 @@ def test_legacy_tools_still_register():
         "ontology_tool",
     }
     assert expected_legacy.issubset(set(registered))
+
+
+def _capture_tool_docstrings() -> dict[str, str]:
+    """Run ``serve()`` against an instrumented FastMCP and return a
+    {tool_name: docstring} dict for every ``@server.tool()`` decoration.
+    """
+    server = FastMCP("agent-readiness-test")
+    docs: dict[str, str] = {}
+    orig_tool = server.tool
+
+    def capture_tool(*args, **kwargs):
+        decorator = orig_tool(*args, **kwargs)
+
+        def wrap(fn):
+            docs[fn.__name__] = fn.__doc__ or ""
+            return decorator(fn)
+
+        return wrap
+
+    server.tool = capture_tool  # type: ignore[assignment]
+    srv_mod._INJECTED_SERVER_FOR_TEST = server
+    try:
+        serve()
+    finally:
+        delattr(srv_mod, "_INJECTED_SERVER_FOR_TEST")
+    return docs
+
+
+def test_docstrings_steer_multi_repo_to_async_tool():
+    """v0.7.2 regression: the docstrings the LLM reads when picking a
+    workspace tool must steer multi-repo paths to
+    ``scan_workspace_async_tool`` (the live dashboard, ~2s return) and
+    away from ``check_workspace_readiness_tool`` (synchronous, blocks
+    the chat for minutes).
+
+    Before v0.7.2 the ``enumerate_workspace_tool`` docstring recommended
+    the synchronous tool for workspaces and did not warn that the sync
+    tool blocks. The skill would dutifully pick the sync path on a
+    17-repo workspace and stall the conversation for 5+ minutes.
+
+    User report 2026-05-27:
+
+        > "Razzle-dazzling… (5m 8s · almost done thinking)
+        >  what's taking so long? shouldn't we get to the prompt
+        >  on dashboard first?"
+    """
+    docs = _capture_tool_docstrings()
+
+    # enumerate_workspace_tool must steer multi-repo to the async tool.
+    enum = docs["enumerate_workspace_tool"]
+    assert "scan_workspace_async_tool" in enum, (
+        "enumerate_workspace_tool docstring must mention "
+        "scan_workspace_async_tool so the LLM picks it for workspaces"
+    )
+    assert "multi-repo workspace" in enum.lower()
+
+    # check_workspace_readiness_tool must warn it is synchronous and
+    # recommend the async tool as the default.
+    sync_doc = docs["check_workspace_readiness_tool"]
+    assert "synchronous" in sync_doc.lower(), (
+        "check_workspace_readiness_tool docstring must declare itself "
+        "synchronous so the LLM doesn't pick it for chat sessions"
+    )
+    assert "scan_workspace_async_tool" in sync_doc, (
+        "check_workspace_readiness_tool docstring must redirect callers "
+        "to scan_workspace_async_tool for normal multi-repo cases"
+    )
+    assert "block" in sync_doc.lower()
+
+    # scan_workspace_async_tool must announce itself as the default.
+    async_doc = docs["scan_workspace_async_tool"]
+    assert "default" in async_doc.lower(), (
+        "scan_workspace_async_tool docstring must mark itself as the "
+        "default workspace path so the LLM picks it first"
+    )
+    assert "dashboard_url" in async_doc
+
+    # get_scan_status_tool must explicitly say "at most once per chat
+    # turn" so the LLM doesn't poll-loop.
+    status_doc = docs["get_scan_status_tool"]
+    assert "once per chat turn" in status_doc.lower(), (
+        "get_scan_status_tool docstring must forbid polling loops"
+    )
