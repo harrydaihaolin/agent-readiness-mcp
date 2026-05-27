@@ -137,6 +137,132 @@ def test_get_scan_status_raises_when_unknown(tmp_path, monkeypatch):
         get_scan_status("nonexistent-scan-id")
 
 
+# ---------- Bundle D enrichment: sse_url / snapshot_url /
+# prompts_pending_count / mode_exit_requested ----------
+
+
+def test_get_scan_status_emits_bundle_d_fields_when_server_running(
+    tmp_path, monkeypatch,
+):
+    """Server URL is known → derive sse_url + snapshot_url from it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / "ws-dddd01"
+    sd.mkdir(parents=True)
+    (sd / "live.json").write_text(json.dumps({
+        "status": "in_progress",
+        "progress": {"completed": 1, "total": 3, "in_flight": []},
+        "overall_score": None,
+        "completed_at": None,
+    }))
+    (sd / "server.url").write_text("http://localhost:55001\n")
+
+    result = get_scan_status("ws-dddd01")
+    assert result["sse_url"] == "http://localhost:55001/sse/scans/ws-dddd01"
+    assert result["snapshot_url"] == (
+        "http://localhost:55001/api/scans/ws-dddd01/snapshot"
+    )
+    assert result["prompts_pending_count"] == 0
+    assert result["mode_exit_requested"] is False
+
+
+def test_get_scan_status_bundle_d_fields_empty_when_no_server_url(
+    tmp_path, monkeypatch,
+):
+    """Older scan (no live server) → sse_url / snapshot_url empty,
+    but the keys are still present so callers can rely on them."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / "ws-dddd02"
+    sd.mkdir(parents=True)
+    (sd / "latest.json").write_text(json.dumps({
+        "status": "completed",
+        "progress": {"completed": 3, "total": 3, "in_flight": []},
+        "overall_score": 85.0,
+        "completed_at": "2026-05-25T00:00:00Z",
+    }))
+
+    result = get_scan_status("ws-dddd02")
+    assert result["sse_url"] == ""
+    assert result["snapshot_url"] == ""
+    assert result["prompts_pending_count"] == 0
+    assert result["mode_exit_requested"] is False
+
+
+def test_get_scan_status_counts_pending_prompts_only(tmp_path, monkeypatch):
+    """1 requested + 1 requested→answered + 1 requested→expired = 1 pending."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / "ws-dddd03"
+    sd.mkdir(parents=True)
+    (sd / "live.json").write_text(json.dumps({
+        "status": "in_progress",
+        "progress": {"completed": 0, "total": 1, "in_flight": []},
+        "overall_score": None,
+        "completed_at": None,
+    }))
+    (sd / "server.url").write_text("http://x:8080\n")
+    (sd / "prompts.jsonl").write_text("\n".join([
+        json.dumps({"seq": 0, "event": "requested", "prompt_id": "p-still-pending",
+                    "at": "2026-01-01T00:00:00Z"}),
+        json.dumps({"seq": 1, "event": "requested", "prompt_id": "p-answered",
+                    "at": "2026-01-01T00:00:01Z"}),
+        json.dumps({"seq": 2, "event": "answered", "prompt_id": "p-answered",
+                    "at": "2026-01-01T00:00:02Z"}),
+        json.dumps({"seq": 3, "event": "requested", "prompt_id": "p-expired",
+                    "at": "2026-01-01T00:00:03Z"}),
+        json.dumps({"seq": 4, "event": "expired", "prompt_id": "p-expired",
+                    "at": "2026-01-01T00:00:04Z"}),
+    ]) + "\n")
+
+    result = get_scan_status("ws-dddd03")
+    assert result["prompts_pending_count"] == 1
+
+
+def test_get_scan_status_handles_torn_prompts_tail(tmp_path, monkeypatch):
+    """A torn-tail line (crashed mid-write) is ignored, not crashed-on."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / "ws-dddd04"
+    sd.mkdir(parents=True)
+    (sd / "live.json").write_text(json.dumps({
+        "status": "in_progress",
+        "progress": {"completed": 0, "total": 1, "in_flight": []},
+        "overall_score": None,
+        "completed_at": None,
+    }))
+    (sd / "prompts.jsonl").write_text(
+        json.dumps({"seq": 0, "event": "requested", "prompt_id": "p-1",
+                    "at": "2026-01-01T00:00:00Z"}) + "\n"
+        + '{"seq": 1, "event": "requ'  # torn — no newline, no closing brace
+    )
+
+    result = get_scan_status("ws-dddd04")
+    assert result["prompts_pending_count"] == 1
+
+
+def test_get_scan_status_reports_mode_exit_when_flag_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / "ws-dddd05"
+    sd.mkdir(parents=True)
+    (sd / "live.json").write_text(json.dumps({
+        "status": "in_progress",
+        "progress": {"completed": 1, "total": 2, "in_flight": []},
+        "overall_score": None,
+        "completed_at": None,
+    }))
+    (sd / "exit_requested").write_text(json.dumps({"source": "button"}))
+
+    result = get_scan_status("ws-dddd05")
+    assert result["mode_exit_requested"] is True
+
+
 # ---------- stop_scan ----------
 
 def test_stop_scan_all_with_no_scans_returns_empty(tmp_path, monkeypatch):
