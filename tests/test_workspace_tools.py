@@ -45,7 +45,18 @@ def test_enumerate_returns_dict_with_kind(tmp_path: Path) -> None:
     (tmp_path / "a" / "README.md").write_text("# a")
     result = enumerate_workspace(str(tmp_path))
     assert result["kind"] == "enumeration"
-    assert result["schema"] == 1
+    assert result["schema"] == 2
+    # v0.7.3 contract: every enumeration envelope carries a
+    # ``classification_hint`` block with a ``recommended_action`` field
+    # the skill follows verbatim.
+    assert "classification_hint" in result
+    hint = result["classification_hint"]
+    assert hint["recommended_action"] in (
+        "scan_repo",
+        "scan_workspace_async",
+        "ask_user",
+        "exit",
+    )
 
 
 def test_enumerate_matches_cli_json(tmp_path: Path) -> None:

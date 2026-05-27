@@ -163,3 +163,38 @@ def test_docstrings_steer_multi_repo_to_async_tool():
     assert "once per chat turn" in status_doc.lower(), (
         "get_scan_status_tool docstring must forbid polling loops"
     )
+
+
+def test_enumerate_docstring_obeys_classification_hint():
+    """v0.7.3 regression: enumerate_workspace_tool must tell the LLM
+    to obey ``classification_hint.recommended_action`` verbatim — no
+    re-classification, no deliberation, no README reads.
+
+    Before v0.7.3 the docstring asked the LLM to apply the rubric
+    itself. For the (root .git AND children .git) case the rubric
+    doesn't match cleanly and the LLM would extended-think its way
+    to a guess and scan the wrong target. User report 2026-05-27:
+
+        > "I think we are taking a lot of time just to classify
+        >  whether it's a workspace, monorepo or single repo, I
+        >  think once we captured some signals then we should
+        >  immediately jump to prompt and let user select…"
+    """
+    docs = _capture_tool_docstrings()
+    doc = docs["enumerate_workspace_tool"]
+    assert "classification_hint" in doc, (
+        "enumerate_workspace_tool docstring must reference the new "
+        "classification_hint field so the LLM reads it"
+    )
+    assert "recommended_action" in doc, (
+        "enumerate_workspace_tool docstring must instruct the LLM "
+        "to act on recommended_action"
+    )
+    assert "ask_user" in doc, (
+        "enumerate_workspace_tool docstring must spell out the "
+        "ask_user contract — the case the LLM was getting wrong"
+    )
+    assert "ambiguity_options" in doc, (
+        "enumerate_workspace_tool docstring must tell the LLM that "
+        "ambiguity_options is pre-rendered (no improvisation)"
+    )
