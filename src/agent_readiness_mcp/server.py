@@ -485,6 +485,20 @@ def scan_workspace_async(
     )
 
 
+def _live_dashboard_url(base_url: str, scan_id: str) -> str:
+    """Build the URL the user should open in a browser.
+
+    The dashboard SPA uses HashRouter, so the live route lives at
+    ``<base>/#/live/<scan_id>``. The bare base URL renders the old
+    WorkspacesPage which polls a /data/index.json not present in a
+    live scan_dir — that path sits on "Loading workspaces…" forever
+    (bug reported 2026-05-27, v0.7.1 fix).
+    """
+    if not base_url:
+        return ""
+    return f"{base_url}/#/live/{scan_id}"
+
+
 def _started_envelope(
     ws: Path, sd: Path, url_file: Path, pid_file: Path,
 ) -> dict[str, Any]:
@@ -496,10 +510,12 @@ def _started_envelope(
             children_total = json.loads(live.read_text())["progress"]["total"]
         except (json.JSONDecodeError, KeyError):
             pass
+    base_url = url_file.read_text().strip()
+    scan_id = pid_data["scan_id"]
     return {
         "status": "started",
-        "dashboard_url": url_file.read_text().strip(),
-        "scan_id": pid_data["scan_id"],
+        "dashboard_url": _live_dashboard_url(base_url, scan_id),
+        "scan_id": scan_id,
         "workspace": str(ws),
         "children_total": children_total,
         "eta_minutes_estimate": max(1, children_total * 30 // 60),
@@ -558,7 +574,11 @@ def get_scan_status(scan_id: str) -> dict[str, Any]:
         "scan_id": scan_id,
         "status": env.get("status"),
         "progress": env.get("progress"),
-        "dashboard_url": url,
+        # Bundle D bugfix (v0.7.1): point at the LivePage (HashRouter
+        # route) instead of the bare base URL — the bare URL renders
+        # the legacy WorkspacesPage which polls a missing
+        # /data/index.json and gets stuck on "Loading workspaces…".
+        "dashboard_url": _live_dashboard_url(url, scan_id),
         "overall_score": env.get("overall_score"),
         "completed_at": env.get("completed_at"),
         # Bundle D additive fields:

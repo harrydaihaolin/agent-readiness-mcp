@@ -65,6 +65,11 @@ def test_scan_workspace_async_returns_dashboard_url(tmp_path, monkeypatch):
     try:
         assert result["status"] == "started"
         assert result["dashboard_url"].startswith("http://")
+        # v0.7.1 regression: the dashboard_url must point at the
+        # LivePage (`/#/live/<scan_id>`), not the bare base URL.
+        # The bare URL renders the legacy WorkspacesPage which gets
+        # stuck on "Loading workspaces…" inside a live scan dir.
+        assert f"/#/live/{result['scan_id']}" in result["dashboard_url"]
         assert result["scan_id"].startswith("ws-")
         assert result["children_total"] in (0, 1)  # may not be written yet
         assert isinstance(result["pid"], int) and result["pid"] > 0
@@ -110,7 +115,11 @@ def test_get_scan_status_reads_live_when_present(tmp_path, monkeypatch):
     result = get_scan_status("ws-aaaaaa")
     assert result["status"] == "in_progress"
     assert result["progress"]["completed"] == 2
-    assert result["dashboard_url"] == "http://localhost:54712"
+    # v0.7.1 regression: dashboard_url points at the LivePage
+    # (HashRouter route), not the bare base URL.
+    assert result["dashboard_url"] == (
+        "http://localhost:54712/#/live/ws-aaaaaa"
+    )
 
 
 def test_get_scan_status_falls_back_to_latest(tmp_path, monkeypatch):
@@ -165,6 +174,49 @@ def test_get_scan_status_emits_bundle_d_fields_when_server_running(
     )
     assert result["prompts_pending_count"] == 0
     assert result["mode_exit_requested"] is False
+
+
+def test_get_scan_status_dashboard_url_is_live_page_not_bare_url(
+    tmp_path, monkeypatch,
+):
+    """v0.7.1 regression: the chat-side `dashboard_url` must be the
+    LivePage URL (`<base>/#/live/<scan_id>`), not the bare base URL.
+
+    The bare base URL renders the legacy WorkspacesPage which polls
+    `/data/index.json` (not present in a live scan_dir) and sits on
+    "Loading workspaces…" forever. The skill prints this URL straight
+    to the user, so the regression is user-visible.
+
+    Also verifies that `sse_url` / `snapshot_url` continue to use the
+    *bare* base URL (since they append path segments — if they used
+    the `#/...` fragment they'd be broken).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from agent_readiness.live_scan.paths import scans_root
+
+    sd = scans_root() / "ws-dddd99"
+    sd.mkdir(parents=True)
+    (sd / "live.json").write_text(json.dumps({
+        "status": "in_progress",
+        "progress": {"completed": 0, "total": 2, "in_flight": []},
+        "overall_score": None,
+        "completed_at": None,
+    }))
+    (sd / "server.url").write_text("http://127.0.0.1:9000\n")
+
+    result = get_scan_status("ws-dddd99")
+    # The dashboard URL is the live route.
+    assert result["dashboard_url"] == (
+        "http://127.0.0.1:9000/#/live/ws-dddd99"
+    )
+    # The API URLs are NOT prefixed with `#/live/…`; they append paths
+    # to the bare base URL.
+    assert result["sse_url"] == "http://127.0.0.1:9000/sse/scans/ws-dddd99"
+    assert result["snapshot_url"] == (
+        "http://127.0.0.1:9000/api/scans/ws-dddd99/snapshot"
+    )
+    assert "#" not in result["sse_url"]
+    assert "#" not in result["snapshot_url"]
 
 
 def test_get_scan_status_bundle_d_fields_empty_when_no_server_url(
