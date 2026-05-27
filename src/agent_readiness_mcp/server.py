@@ -518,6 +518,19 @@ def get_scan_status(scan_id: str) -> dict[str, Any]:
     Reads ``live.json`` if present, else ``latest.json``. Cheap and safe
     to call repeatedly. Returns the dashboard URL when the local server
     is still running; empty string otherwise.
+
+    Bundle D enrichment (additive — never raises if the new files are
+    absent):
+
+      ``sse_url``               URL to subscribe to the SSE event stream.
+      ``snapshot_url``          URL of the WorkspaceScanSnapshot JSON.
+      ``prompts_pending_count`` count of pending interactive prompts.
+      ``mode_exit_requested``   True when the user clicked Exit Dashboard.
+
+    The skill calls this once per chat turn after handing scanning over
+    to dashboard mode — it does NOT continuously stream from the SSE
+    endpoint, matching the spec § 4 "hands-off skill ↔ dashboard bridge"
+    decision.
     """
     from agent_readiness.live_scan.paths import scans_root
 
@@ -532,6 +545,15 @@ def get_scan_status(scan_id: str) -> dict[str, Any]:
     url_file = sd / "server.url"
     if url_file.exists():
         url = url_file.read_text().strip()
+
+    # Bundle D — derive the new fields. All four are safe-on-missing so
+    # this enrichment never breaks callers that hit a scan_dir from a
+    # pre-3.4.0 worker (events.jsonl / prompts.jsonl simply absent).
+    sse_url = f"{url}/sse/scans/{scan_id}" if url else ""
+    snapshot_url = f"{url}/api/scans/{scan_id}/snapshot" if url else ""
+    prompts_pending_count = _count_pending_prompts(sd / "prompts.jsonl")
+    mode_exit_requested = (sd / "exit_requested").exists()
+
     return {
         "scan_id": scan_id,
         "status": env.get("status"),
@@ -539,7 +561,47 @@ def get_scan_status(scan_id: str) -> dict[str, Any]:
         "dashboard_url": url,
         "overall_score": env.get("overall_score"),
         "completed_at": env.get("completed_at"),
+        # Bundle D additive fields:
+        "sse_url": sse_url,
+        "snapshot_url": snapshot_url,
+        "prompts_pending_count": prompts_pending_count,
+        "mode_exit_requested": mode_exit_requested,
     }
+
+
+def _count_pending_prompts(prompts_file) -> int:
+    """Count prompt_ids in ``prompts.jsonl`` that are still ``pending``.
+
+    A prompt is pending if it has a ``requested`` line and neither an
+    ``answered`` nor an ``expired`` line. Resilient to a missing file
+    (returns 0) and to a torn-tail line (stops at the first JSON parse
+    error, matching the engine's reader contract).
+    """
+    if not prompts_file.exists():
+        return 0
+    states: dict[str, str] = {}
+    try:
+        for raw in prompts_file.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                # Torn line at tail — stop counting, MCP's read isn't
+                # the writer so we don't try to recover further.
+                break
+            pid = obj.get("prompt_id")
+            event = obj.get("event")
+            if not pid or event not in ("requested", "answered", "expired"):
+                continue
+            if event == "requested":
+                states.setdefault(pid, "pending")
+            else:  # answered | expired — both terminate "pending"
+                states[pid] = "closed"
+    except OSError:
+        return 0
+    return sum(1 for s in states.values() if s == "pending")
 
 
 def stop_scan(scan_id: str) -> dict[str, Any]:

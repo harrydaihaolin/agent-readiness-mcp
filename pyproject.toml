@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-readiness-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "MCP server exposing agent-readiness scan, detect, and apply tools to coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,9 +18,12 @@ dependencies = [
     # surfaces its structured `multi_repo_workspace` error.
     # 3.0.4+ adds the `live_scan` package, `render` module, and the
     # `scan-and-view`/`scan-status`/`scan-stop`/`scan-list`/`render-report`
-    # CLI commands that the live-scan tools wrap. Will be bumped to
-    # >=3.1.0 once that release ships.
-    "agent-readiness>=3.2.0",
+    # CLI commands that the live-scan tools wrap.
+    # 3.4.0+ adds the Bundle D live-dashboard surface (events.jsonl +
+    # prompts.jsonl + SSE/JSON endpoints on the scan-and-view server)
+    # that get_scan_status's sse_url / snapshot_url / prompts_pending_count
+    # / mode_exit_requested fields expose to coding agents.
+    "agent-readiness>=3.4.0",
     "mcp>=1.0.0",
 ]
 
