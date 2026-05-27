@@ -37,6 +37,7 @@ def test_all_live_scan_tools_register():
         delattr(srv_mod, "_INJECTED_SERVER_FOR_TEST")
 
     expected = {
+        "scan_and_view_tool",
         "scan_workspace_async_tool",
         "get_scan_status_tool",
         "stop_scan_tool",
@@ -162,6 +163,31 @@ def test_docstrings_steer_multi_repo_to_async_tool():
     status_doc = docs["get_scan_status_tool"]
     assert "once per chat turn" in status_doc.lower(), (
         "get_scan_status_tool docstring must forbid polling loops"
+    )
+
+
+def test_scan_and_view_is_marked_as_the_front_door_tool():
+    """v0.7.4 contract: ``scan_and_view_tool`` is the single entry
+    point. Its docstring must announce itself as **THE FRONT-DOOR
+    TOOL** and document the three return shapes (started /
+    needs_disambiguation / not_a_code_repo) so the LLM uses it as
+    the first call on any path. Prior versions required the skill to
+    chain ``enumerate_workspace_tool`` → think → pick → call, which
+    burned 30s of latency per request.
+    """
+    docs = _capture_tool_docstrings()
+    doc = docs["scan_and_view_tool"]
+    assert "FRONT-DOOR" in doc.upper(), (
+        "scan_and_view_tool must announce itself as the front door so "
+        "the LLM calls it first instead of chaining enumerate + pick"
+    )
+    assert "first" in doc.lower()
+    assert "started" in doc.lower()
+    assert "needs_disambiguation" in doc
+    assert "not_a_code_repo" in doc
+    assert "treat_as" in doc, (
+        "scan_and_view_tool must document the treat_as override so "
+        "the LLM can re-call after a disambiguation prompt"
     )
 
 
