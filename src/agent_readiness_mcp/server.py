@@ -747,29 +747,43 @@ def serve(transport: str = "stdio") -> None:
 
     @server.tool()
     def enumerate_workspace_tool(path: str) -> str:
-        """Enumerate PATH's direct children for workspace classification.
+        """Enumerate PATH's direct children AND classify the layout.
 
-        Returns the ``EnumerationReport`` JSON envelope. Use this before
-        any scan call when PATH is unfamiliar — the LLM classifies the
-        result and decides which scan tool to chain next:
+        Returns the ``EnumerationReport`` JSON envelope. The envelope
+        carries a **``classification_hint``** block (added in
+        agent-readiness 3.4.3) that the caller MUST obey verbatim
+        — do not re-classify in the LLM, do not deliberate, do not
+        read READMEs first. The hint is a pure function of the
+        signals; LLM judgment cannot improve on it and burns wall-clock
+        time.
 
-          - **single repo / monorepo** → ``scan_repo_tool`` (synchronous,
-            seconds).
-          - **multi-repo workspace (≥ 2 children with ``has_git=true``)**
-            → **``scan_workspace_async_tool`` (DEFAULT, recommended).**
-            Returns within ~2s with a live ``dashboard_url`` the user
-            opens in a browser; the chat stays free, per-repo progress
-            and interactive prompts stream to the dashboard. Poll
-            ``get_scan_status_tool`` once per chat turn.
-          - workspace **opt-out → headless** →
-            ``check_workspace_readiness_tool`` (SYNCHRONOUS — scans every
-            child sequentially, ≥ 30s per repo, blocks the chat for the
-            whole duration). Use only when the user explicitly refused
-            dashboard mode or when running headless in CI.
+        Read ``envelope["classification_hint"]["recommended_action"]``
+        and act:
 
-        For any workspace with more than 2-3 repos, picking the sync
-        tool over the async one is almost always a bug: the chat hangs
-        for minutes while the user wonders what's happening.
+          - ``"scan_repo"`` → call ``scan_repo_tool(path)``.
+            ``classification`` will be ``single_repo`` or ``monorepo``.
+          - ``"scan_workspace_async"`` → call
+            ``scan_workspace_async_tool(path, children=...)`` (DASHBOARD
+            MODE, the default for multi-repo workspaces). Returns in
+            ~2s with a ``dashboard_url`` to share with the user. Do
+            NOT use ``check_workspace_readiness_tool`` for this case —
+            it is synchronous and blocks the chat for minutes per repo.
+          - ``"ask_user"`` → **STOP. Do not scan.** Signals are
+            ambiguous from data alone (e.g. root has ``.git`` AND
+            children also have ``.git`` — could be a workspace nested
+            in a meta-repo, a monorepo with submodules, or a single
+            repo with unrelated sub-checkouts). The envelope carries
+            pre-rendered ``ambiguity_reason`` and ``ambiguity_options``
+            ``[{id, label, route, hint}]`` — paint them into a chat
+            prompt verbatim, wait for the user to pick, then chain
+            the matching ``route`` (``scan_repo`` or
+            ``scan_workspace_async``).
+          - ``"exit"`` → not a code repo. Tell the user, do not scan.
+
+        ``classification_hint`` may be absent on payloads from
+        agent-readiness < 3.4.3. In that case fall back to the manual
+        rubric (root.has_git / children_with_git / manifest_signals)
+        — but for new installs this branch is dead code.
         """
         return json.dumps(enumerate_workspace(path), indent=2)
 
