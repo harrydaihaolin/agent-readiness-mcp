@@ -210,3 +210,53 @@ def test_scan_and_view_tool_is_not_registered_in_v0_8_0():
     src = pyinspect.getsource(serve)
     assert "scan_and_view_tool" not in src, \
         "scan_and_view_tool registration should be removed in v0.8.0"
+
+
+def test_inspect_tool_docstring_steers_to_typed_scan_tools():
+    """`inspect_tool` must teach the LLM to chain into scan_repo /
+    scan_monorepo / scan_workspace based on the suggested_type."""
+    import inspect as pyinspect
+    from agent_readiness_mcp.server import serve
+
+    src = pyinspect.getsource(serve)
+    # Find the inspect_tool block specifically.
+    idx = src.index("def inspect_tool")
+    block = src[idx:idx + 2000]
+    assert "scan_repo_tool" in block
+    assert "scan_monorepo_tool" in block
+    assert "scan_workspace_tool" in block
+    assert "BEFORE picking which scan tool" in block
+
+
+def test_scan_repo_tool_docstring_routes_to_others_on_mismatch():
+    import inspect as pyinspect
+    from agent_readiness_mcp.server import serve
+
+    src = pyinspect.getsource(serve)
+    idx = src.index("def scan_repo_tool")
+    block = src[idx:idx + 2000]
+    assert "scan_monorepo_tool" in block
+    assert "scan_workspace_tool" in block
+    assert "inspect_tool" in block
+
+
+def test_scan_monorepo_tool_docstring_describes_picker_layout():
+    import inspect as pyinspect
+    from agent_readiness_mcp.server import serve
+
+    src = pyinspect.getsource(serve)
+    idx = src.index("def scan_monorepo_tool")
+    block = src[idx:idx + 1500]
+    assert "grouped" in block.lower()
+    assert "/#/onboarding/" in block
+
+
+def test_scan_workspace_tool_docstring_describes_picker_layout():
+    import inspect as pyinspect
+    from agent_readiness_mcp.server import serve
+
+    src = pyinspect.getsource(serve)
+    idx = src.index("def scan_workspace_tool")
+    block = src[idx:idx + 1500]
+    assert "flat" in block.lower()
+    assert "/#/onboarding/" in block
