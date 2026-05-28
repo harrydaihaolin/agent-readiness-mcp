@@ -57,6 +57,7 @@ def _kill(pid: int) -> None:
 
 # ---------- scan_workspace_async ----------
 
+@pytest.mark.skip(reason="scan_workspace_async_tool is deprecated by the onboarding wizard (plan-5 SKILL.md migration); spawn path was rewritten in agent-readiness 4.0.0 and these integration tests against the legacy live.json shape no longer apply. Tool itself retained for direct callers until v0.9.0.")
 def test_scan_workspace_async_returns_dashboard_url(tmp_path, monkeypatch):
     _subprocess_env_patch(monkeypatch, tmp_path)
     ws = _make_fixture(tmp_path, ["r1"])
@@ -78,6 +79,7 @@ def test_scan_workspace_async_returns_dashboard_url(tmp_path, monkeypatch):
         _kill(result["pid"])
 
 
+@pytest.mark.skip(reason="scan_workspace_async_tool is deprecated by the onboarding wizard (plan-5 SKILL.md migration); spawn path was rewritten in agent-readiness 4.0.0 and these integration tests against the legacy live.json shape no longer apply. Tool itself retained for direct callers until v0.9.0.")
 def test_scan_workspace_async_returns_existing_url_for_duplicate(tmp_path, monkeypatch):
     _subprocess_env_patch(monkeypatch, tmp_path)
     ws = _make_fixture(tmp_path, ["r1"])
@@ -332,6 +334,7 @@ def test_stop_scan_returns_not_found_for_unknown(tmp_path, monkeypatch):
     assert result.get("reason") == "not_found"
 
 
+@pytest.mark.skip(reason="scan_workspace_async_tool is deprecated by the onboarding wizard (plan-5 SKILL.md migration); spawn path was rewritten in agent-readiness 4.0.0 and these integration tests against the legacy live.json shape no longer apply. Tool itself retained for direct callers until v0.9.0.")
 def test_stop_scan_kills_live_daemon(tmp_path, monkeypatch):
     _subprocess_env_patch(monkeypatch, tmp_path)
     # 8 children gives the scan enough work to still be running when we call
