@@ -37,7 +37,8 @@ def test_all_live_scan_tools_register():
         delattr(srv_mod, "_INJECTED_SERVER_FOR_TEST")
 
     expected = {
-        "scan_and_view_tool",
+        "inspect_tool",
+        "scan_monorepo_tool",
         "scan_workspace_async_tool",
         "get_scan_status_tool",
         "stop_scan_tool",
@@ -166,31 +167,6 @@ def test_docstrings_steer_multi_repo_to_async_tool():
     )
 
 
-def test_scan_and_view_is_marked_as_the_front_door_tool():
-    """v0.7.4 contract: ``scan_and_view_tool`` is the single entry
-    point. Its docstring must announce itself as **THE FRONT-DOOR
-    TOOL** and document the three return shapes (started /
-    needs_disambiguation / not_a_code_repo) so the LLM uses it as
-    the first call on any path. Prior versions required the skill to
-    chain ``enumerate_workspace_tool`` → think → pick → call, which
-    burned 30s of latency per request.
-    """
-    docs = _capture_tool_docstrings()
-    doc = docs["scan_and_view_tool"]
-    assert "FRONT-DOOR" in doc.upper(), (
-        "scan_and_view_tool must announce itself as the front door so "
-        "the LLM calls it first instead of chaining enumerate + pick"
-    )
-    assert "first" in doc.lower()
-    assert "started" in doc.lower()
-    assert "needs_disambiguation" in doc
-    assert "not_a_code_repo" in doc
-    assert "treat_as" in doc, (
-        "scan_and_view_tool must document the treat_as override so "
-        "the LLM can re-call after a disambiguation prompt"
-    )
-
-
 def test_enumerate_docstring_obeys_classification_hint():
     """v0.7.3 regression: enumerate_workspace_tool must tell the LLM
     to obey ``classification_hint.recommended_action`` verbatim — no
@@ -224,3 +200,13 @@ def test_enumerate_docstring_obeys_classification_hint():
         "enumerate_workspace_tool docstring must tell the LLM that "
         "ambiguity_options is pre-rendered (no improvisation)"
     )
+
+
+def test_scan_and_view_tool_is_not_registered_in_v0_8_0():
+    """The MCP server's expected tool list should not include scan_and_view_tool."""
+    import inspect as pyinspect
+    from agent_readiness_mcp.server import serve
+
+    src = pyinspect.getsource(serve)
+    assert "scan_and_view_tool" not in src, \
+        "scan_and_view_tool registration should be removed in v0.8.0"

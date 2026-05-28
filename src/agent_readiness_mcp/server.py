@@ -413,108 +413,6 @@ def scan_workspace_async(
     )
 
 
-def scan_and_view(
-    path: str,
-    treat_as: str | None = None,
-) -> dict[str, Any]:
-    """The single front-door for scanning anything.
-
-    Auto-enumerates ``path``, reads ``classification_hint``, then
-    dispatches:
-
-      - Clear single repo / monorepo / workspace → spawns
-        ``agent-readiness scan-and-view`` and returns the same
-        ``StartedScan`` envelope ``scan_workspace_async`` does
-        (``status="started"``, ``dashboard_url``, etc.). For
-        single-repo paths the dashboard renders a workspace-of-one
-        (one card scanning).
-      - Ambiguous → returns ``{"status": "needs_disambiguation",
-        "ambiguity_reason": "...", "ambiguity_options": [...]}``
-        WITHOUT spawning anything. The caller (skill) paints the
-        prompt into chat, gets the user's pick, then re-calls
-        ``scan_and_view(path, treat_as=<option_id>)``.
-      - Not a code repo → returns ``{"status": "not_a_code_repo",
-        "message": ..., "rationale": ...}``.
-
-    ``treat_as`` is the disambiguation override; valid values are
-    ``"workspace"``, ``"monorepo"``, ``"single_repo"``, and ``"skip"``
-    (the option IDs the scanner pre-renders for ``ask_user`` cases).
-    ``"workspace"`` routes to a workspace scan; everything else routes
-    to a single-repo scan; ``"skip"`` returns ``not_a_code_repo``.
-
-    If a live scan already exists for ``path`` (PID-stamp verified),
-    returns *that* scan's URL — same idempotency as
-    ``scan_workspace_async``.
-    """
-    from agent_readiness.enumerate import enumerate_workspace as _enumerate
-
-    p = Path(path).expanduser().resolve()
-    if not p.is_dir():
-        raise ValueError(f"path is not a directory: {p}")
-
-    report = _enumerate(p)
-    hint = report.classification_hint
-
-    if treat_as is not None:
-        normalized = treat_as.strip().lower()
-        if normalized in ("workspace",):
-            action = "scan_workspace_async"
-        elif normalized in ("monorepo", "single_repo", "single"):
-            action = "scan_repo"
-        elif normalized in ("skip", "exit"):
-            action = "exit"
-        else:
-            return {
-                "status": "invalid_input",
-                "error": "invalid_treat_as",
-                "message": (
-                    f"unknown treat_as={treat_as!r}; valid: "
-                    "'workspace', 'monorepo', 'single_repo', 'skip'"
-                ),
-            }
-    else:
-        action = hint.recommended_action if hint else "scan_workspace_async"
-
-    if action == "exit":
-        return {
-            "status": "not_a_code_repo",
-            "message": (
-                "This path is not a code repository. Tell the user and stop."
-            ),
-            "rationale": hint.rationale if hint else "no .git, no README",
-        }
-
-    if action == "ask_user":
-        assert hint is not None  # ask_user only comes from a real hint
-        return {
-            "status": "needs_disambiguation",
-            "ambiguity_reason": hint.ambiguity_reason,
-            "ambiguity_options": hint.ambiguity_options,
-            "rationale": hint.rationale,
-            "guidance": (
-                "Paint ambiguity_reason and ambiguity_options into a chat "
-                "prompt verbatim. After the user picks, re-call "
-                "scan_and_view(path, treat_as=<option.id>). Do not "
-                "improvise wording, do not read READMEs to double-check."
-            ),
-        }
-
-    if action == "scan_workspace_async":
-        children: list[str] = [
-            str(c.path) for c in report.children if c.has_git
-        ]
-        if not children:
-            # Defensive: classifier said workspace but no children with .git
-            # (shouldn't happen given the rubric, but don't strand the user).
-            children = [str(p)]
-    else:
-        # scan_repo: workspace of one — the dashboard renders a single
-        # card and the underlying engine scans the root as a child.
-        children = [str(p)]
-
-    return scan_workspace_async(str(p), children=children)
-
-
 def _live_dashboard_url(base_url: str, scan_id: str) -> str:
     """Build the URL the user should open in a browser.
 
@@ -1084,62 +982,6 @@ def serve(transport: str = "stdio") -> None:
     # ----- Plan 3: live-scan tools ---------------------------------------
 
     @server.tool()
-    def scan_and_view_tool(
-        path: str,
-        treat_as: str | None = None,
-    ) -> str:
-        """**THE FRONT-DOOR TOOL — call this first for ANY path.**
-
-        Single-tool entry point. The skill calls this immediately on
-        every user-supplied path; the tool auto-enumerates,
-        auto-classifies, auto-launches the dashboard, and returns the
-        URL within ~2 seconds. The skill makes zero classification
-        decisions and zero pre-flight tool calls.
-
-        Possible return shapes:
-
-          1. ``{"status": "started", "dashboard_url": "...", ...}``
-             — Same envelope as ``scan_workspace_async_tool``. The
-             dashboard is up. Share the URL with the user verbatim
-             and stop calling tools. Works for single repos
-             (one-card workspace), monorepos, and multi-repo
-             workspaces alike.
-
-          2. ``{"status": "needs_disambiguation",
-                "ambiguity_reason": "...",
-                "ambiguity_options": [{"id", "label", "route", "hint"}, ...]}``
-             — Signals are ambiguous (e.g. root has ``.git`` AND
-             children also have ``.git``). The scanner already
-             pre-rendered the chat prompt. Paint it verbatim, get
-             the user's pick, then re-call
-             ``scan_and_view_tool(path, treat_as=<option.id>)``.
-
-          3. ``{"status": "not_a_code_repo", "message": ...}``
-             — No .git, no README, no children. Tell the user, stop.
-
-          4. ``{"status": "invalid_input", ...}`` — bad ``treat_as``
-             value. Surface the error.
-
-        Why this exists: prior to v0.7.4 the skill had to chain
-        ``enumerate_workspace_tool`` → think → pick a scan tool →
-        call it. Three tool calls and two LLM-thinking turns =
-        30+ seconds of latency before the dashboard appears. This
-        tool collapses all of that into one call.
-
-        ``treat_as`` is the disambiguation override (option IDs
-        the scanner pre-renders): ``"workspace"``, ``"monorepo"``,
-        ``"single_repo"``, or ``"skip"``.
-        """
-        try:
-            return json.dumps(scan_and_view(path, treat_as=treat_as), indent=2)
-        except (ValueError, RuntimeError) as exc:
-            return json.dumps({
-                "status": "error",
-                "error": "scan_start_failed",
-                "message": str(exc),
-            })
-
-    @server.tool()
     def scan_workspace_async_tool(
         workspace_path: str,
         children: list[str] | None = None,
@@ -1266,7 +1108,6 @@ __all__ = [
     "manifest_validate",
     "ontology",
     "render_workspace_report",
-    "scan_and_view",
     "scan_monorepo",
     "scan_repo",
     "scan_workspace",
