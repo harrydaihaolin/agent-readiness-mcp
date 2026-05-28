@@ -2,19 +2,20 @@
 
 These tests exercise the wrappers, not the MCP transport — the
 transport is provided by the official ``mcp`` SDK and is well-tested
-upstream. We check that ``scan_repo`` returns a recognisable report
-and that ``apply_top_action`` honours its preconditions.
+upstream. ``scan_repo`` / ``scan_workspace`` (v0.8.0+) launch the
+onboarding wizard via the CLI; sync scan envelopes are covered by
+``check_workspace_readiness`` and the live-scan tool tests.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
 from agent_readiness_mcp.server import (
-    MultiRepoWorkspaceError,
     apply_top_action,
     detect_workspace,
     list_friction,
@@ -23,19 +24,24 @@ from agent_readiness_mcp.server import (
 )
 
 
-def test_scan_repo_returns_report_envelope():
+def test_scan_repo_returns_onboarding_envelope(monkeypatch):
+    """v0.8.0: scan_repo opens the onboarding wizard, not a sync report."""
     with TemporaryDirectory() as td:
+        monkeypatch.setenv("HOME", td)
         repo = Path(td)
-        (repo / "README.md").write_text("# repo\n")
+        (repo / ".git").mkdir()
         report = scan_repo(str(repo))
-        assert "overall_score" in report
-        assert isinstance(report["overall_score"], (int, float))
-        assert "pillars" in report
+        assert report["status"] == "onboarding_required"
+        assert report["type"] == "single_repo"
+        assert "/onboarding/" in report["dashboard_url"]
 
 
 def test_scan_repo_rejects_nonexistent_path():
-    with pytest.raises(ValueError, match="not a directory"):
-        scan_repo("/this/path/does/not/exist/xyz")
+    with TemporaryDirectory() as td:
+        os.environ.setdefault("HOME", td)
+        result = scan_repo("/this/path/does/not/exist/xyz")
+        assert result["status"] == "error"
+        assert result["exit_code"] == 2
 
 
 def test_apply_top_action_returns_result_envelope():
@@ -120,90 +126,14 @@ def test_detect_workspace_rejects_nonexistent_path():
         detect_workspace("/this/path/does/not/exist/xyz")
 
 
-def test_scan_repo_raises_on_multi_repo_workspace():
-    """scan_repo refuses multi-repo paths with the structured payload."""
+def test_scan_workspace_returns_onboarding_envelope(monkeypatch):
+    """v0.8.0: scan_workspace opens the onboarding wizard."""
     with TemporaryDirectory() as td:
+        monkeypatch.setenv("HOME", td)
         root = Path(td)
         for name in ("alpha", "beta"):
             (root / name).mkdir()
-            _make_git(root / name)
-        with pytest.raises(MultiRepoWorkspaceError) as info:
-            scan_repo(str(root))
-        payload = info.value.payload
-        assert payload["error"] == "multi_repo_workspace"
-        assert payload["version"] == "detect_v1"
-        assert "alpha" in payload["detected_repos"]
-        assert "beta" in payload["detected_repos"]
-
-
-def test_scan_workspace_fans_out_to_all_detected():
-    """scan_workspace returns one envelope with N scan reports."""
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        for name in ("alpha", "beta"):
-            (root / name).mkdir()
-            _make_git(root / name)
-            (root / name / "README.md").write_text(f"# {name}\n")
+            (root / name / ".git").mkdir()
         result = scan_workspace(str(root))
-        assert result["classification"] == "multi_repo_workspace"
-        assert {s["name"] for s in result["scanned"]} == {"alpha", "beta"}
-        for entry in result["scanned"]:
-            assert "report" in entry
-            assert "overall_score" in entry["report"]
-
-
-def test_scan_workspace_select_subset():
-    """scan_workspace honours `select` and surfaces unmatched names."""
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        for name in ("alpha", "beta", "gamma"):
-            (root / name).mkdir()
-            _make_git(root / name)
-            (root / name / "README.md").write_text(f"# {name}\n")
-        result = scan_workspace(str(root), select=["alpha", "nope"])
-        scanned_names = {s["name"] for s in result["scanned"]}
-        assert scanned_names == {"alpha"}
-        skip_by_reason = {s["reason"]: s for s in result["skipped"]}
-        assert "not in select list" in skip_by_reason
-        assert "not detected" in skip_by_reason
-        assert skip_by_reason["not detected"]["name"] == "nope"
-
-
-def test_scan_workspace_on_single_repo_returns_single_entry():
-    """Calling scan_workspace on a single-repo path still works.
-
-    The skill can branch on classification alone and reuse the same
-    tool for both single-repo and multi-repo paths.
-    """
-    with TemporaryDirectory() as td:
-        repo = Path(td)
-        _make_git(repo)
-        (repo / "README.md").write_text("# repo\n")
-        result = scan_workspace(str(repo))
-        assert result["classification"] == "single_repo"
-        assert len(result["scanned"]) == 1
-        assert result["scanned"][0]["report"]["overall_score"] >= 0
-
-
-def test_scan_workspace_passes_through_drift_warnings():
-    """AGENTS.md drift surfaces in scan_workspace, not just detect."""
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        _make_git(root / "alpha")
-        (root / "AGENTS.md").write_text(
-            "# Workspace\n\n## Repos\n\n"
-            "| Repo | One-line | Lang |\n"
-            "|---|---|---|\n"
-            "| [`alpha`](./alpha) | Alpha | Python |\n"
-            "| [`beta`](./beta) | Missing | Rust |\n"
-        )
-        # alpha alone -> single_repo, not multi_repo_workspace, so
-        # drift logic doesn't apply. Add a second repo to keep it
-        # multi_repo.
-        _make_git(root / "gamma")
-        result = scan_workspace(str(root))
-        kinds = {w["kind"] for w in result["drift_warnings"]}
-        # Both kinds expected: AGENTS.md lists beta (missing on disk),
-        # and gamma is on disk but not in AGENTS.md.
-        assert "missing_from_disk" in kinds
-        assert "missing_from_agents" in kinds
+        assert result["status"] == "onboarding_required"
+        assert result["type"] == "workspace"

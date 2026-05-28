@@ -143,158 +143,61 @@ def check_workspace_readiness(
 
 
 def scan_repo(path: str) -> dict[str, Any]:
-    """Scan ``path`` and return the JSON-serialisable readiness report.
+    """Open the onboarding wizard with type committed as single_repo."""
+    import subprocess
 
-    Includes ``overall_score``, ``pillar_scores``, every check result,
-    and the ``top_action`` pin (the single highest-priority structured
-    fix the engine recommends). Callers chain ``apply_top_action`` to
-    actually land the recommended fix.
-
-    Raises :class:`MultiRepoWorkspaceError` when ``path`` is a multi-repo
-    workspace — same contract as ``agent-readiness scan`` from the CLI
-    (which exits 2 with a structured stderr envelope). Use
-    :func:`scan_workspace` for that case, or :func:`detect_workspace`
-    to enumerate before deciding.
-    """
-    from agent_readiness.context import RepoContext
-    from agent_readiness.rules_eval import evaluate_rules
-    from agent_readiness.rules_runtime import load_default_rules
-    from agent_readiness.scorer import score as score_results
-    from agent_readiness.workspace_detect import detect
-
-    repo = Path(path).expanduser().resolve()
-    if not repo.is_dir():
-        raise ValueError(f"path is not a directory: {repo}")
-
-    classification = detect(repo)
-    if classification.classification == "multi_repo_workspace":
-        raise MultiRepoWorkspaceError({
-            "error": "multi_repo_workspace",
-            "hint": (
-                "this path contains multiple repos; call "
-                "`detect_workspace(path)` to list them or "
-                "`scan_workspace(path, select=[...])` to scan a subset"
-            ),
-            "detected_repos": [r.name for r in classification.repos],
-            "root": classification.root,
-            "version": classification.version,
-        })
-
-    rules = load_default_rules()
-    if not rules:
-        raise RuntimeError(
-            "agent-readiness rules pack is missing; reinstall agent-readiness."
-        )
-    ctx = RepoContext(root=repo)
-    results = []
-    for rule in rules:
-        results.extend(evaluate_rules([rule], ctx))
-    report = score_results(repo, results)
-    report.languages = ctx.detected_languages
-    return report.to_dict()
-
-
-def scan_workspace(
-    path: str,
-    select: list[str] | None = None,
-) -> dict[str, Any]:
-    """Scan every detected repo in a multi-repo workspace (or a subset).
-
-    On a single-repo or monorepo classification, returns a single-entry
-    ``scanned`` list — same wire shape, so the skill can branch only on
-    the ``classification`` field instead of dispatching to two tools.
-
-    Selection rules:
-
-    * ``select=None`` → scan everything detected.
-    * ``select=[name, ...]`` → scan only the named repos. Names that
-      don't match any detected repo land in ``skipped`` with
-      ``reason="not detected"`` rather than failing the whole call —
-      the skill is the right place to surface the user-facing error.
-    """
-    from agent_readiness.workspace_detect import detect
-
-    root = Path(path).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"path is not a directory: {root}")
-
-    classification = detect(root)
-    detected_by_name: dict[str, dict[str, Any]] = {}
-    for r in classification.repos:
-        detected_by_name[r.name] = {
-            "name": r.name,
-            "path": r.path,
-            "rel_path": r.rel_path,
-            "display_name": r.display_name,
+    proc = subprocess.run(
+        ["agent-readiness", "scan-repo", path, "--json", "--no-open"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness scan-repo failed",
+            "exit_code": proc.returncode,
+        }
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "error",
+            "error": f"non-JSON output from scan-repo: {exc}",
+            "raw_stdout": proc.stdout,
         }
 
-    if select is None:
-        chosen = list(detected_by_name.keys())
-        unmatched: list[str] = []
-    else:
-        chosen = [n for n in select if n in detected_by_name]
-        unmatched = [n for n in select if n not in detected_by_name]
 
-    scanned: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for name in detected_by_name:
-        if name not in chosen:
-            skipped.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "reason": "not in select list",
-            })
-            continue
-        repo_path = detected_by_name[name]["path"]
-        try:
-            report = scan_repo(repo_path)
-        except MultiRepoWorkspaceError as exc:
-            # Nested multi_repo_workspace under a multi-repo root —
-            # spec non-goal but defensive: skip rather than recurse.
-            skipped.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "reason": "nested multi_repo_workspace",
-                "detail": exc.payload,
-            })
-        except Exception as exc:
-            skipped.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "reason": "scan_failed",
-                "detail": str(exc),
-            })
-        else:
-            scanned.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "display_name": detected_by_name[name]["display_name"],
-                "report": report,
-            })
+def scan_monorepo(path: str) -> dict[str, Any]:
+    """Open the onboarding wizard with type committed as monorepo."""
+    import subprocess
 
-    for name in unmatched:
-        skipped.append({
-            "name": name,
-            "rel_path": None,
-            "reason": "not detected",
-        })
+    proc = subprocess.run(
+        ["agent-readiness", "scan-monorepo", path, "--json", "--no-open"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness scan-monorepo failed",
+            "exit_code": proc.returncode,
+        }
+    return json.loads(proc.stdout)
 
-    return {
-        "version": classification.version,
-        "root": classification.root,
-        "classification": classification.classification,
-        "scanned": scanned,
-        "skipped": skipped,
-        "drift_warnings": [
-            {
-                "kind": w.kind,
-                "agents_md_path": w.agents_md_path,
-                "detected_path": w.detected_path,
-                "message": w.message,
-            }
-            for w in classification.drift_warnings
-        ],
-    }
+
+def scan_workspace(path: str) -> dict[str, Any]:
+    """Open the onboarding wizard with type committed as workspace."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["agent-readiness", "scan-workspace", path, "--json", "--no-open"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness scan-workspace failed",
+            "exit_code": proc.returncode,
+        }
+    return json.loads(proc.stdout)
 
 
 def apply_top_action(path: str, run_verify: bool = True) -> dict[str, Any]:
@@ -435,6 +338,31 @@ def ontology(subcmd: str, arguments: dict[str, Any] | None = None) -> dict[str, 
 # ---------- live scan tools (Plan 3) --------------------------------------
 
 
+def inspect(path: str) -> dict[str, Any]:
+    """Run `agent-readiness inspect <path> --json` and return the parsed
+    envelope as a dict. Used by the MCP `inspect_tool` wrapper."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["agent-readiness", "inspect", path, "--json"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness inspect failed",
+            "exit_code": proc.returncode,
+        }
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "error",
+            "error": f"non-JSON output from inspect: {exc}",
+            "raw_stdout": proc.stdout,
+        }
+
+
 def scan_workspace_async(
     workspace_path: str,
     children: list[str] | None = None,
@@ -483,108 +411,6 @@ def scan_workspace_async(
     raise RuntimeError(
         f"scan-and-view did not write {url_file} within {server_url_timeout_s}s"
     )
-
-
-def scan_and_view(
-    path: str,
-    treat_as: str | None = None,
-) -> dict[str, Any]:
-    """The single front-door for scanning anything.
-
-    Auto-enumerates ``path``, reads ``classification_hint``, then
-    dispatches:
-
-      - Clear single repo / monorepo / workspace → spawns
-        ``agent-readiness scan-and-view`` and returns the same
-        ``StartedScan`` envelope ``scan_workspace_async`` does
-        (``status="started"``, ``dashboard_url``, etc.). For
-        single-repo paths the dashboard renders a workspace-of-one
-        (one card scanning).
-      - Ambiguous → returns ``{"status": "needs_disambiguation",
-        "ambiguity_reason": "...", "ambiguity_options": [...]}``
-        WITHOUT spawning anything. The caller (skill) paints the
-        prompt into chat, gets the user's pick, then re-calls
-        ``scan_and_view(path, treat_as=<option_id>)``.
-      - Not a code repo → returns ``{"status": "not_a_code_repo",
-        "message": ..., "rationale": ...}``.
-
-    ``treat_as`` is the disambiguation override; valid values are
-    ``"workspace"``, ``"monorepo"``, ``"single_repo"``, and ``"skip"``
-    (the option IDs the scanner pre-renders for ``ask_user`` cases).
-    ``"workspace"`` routes to a workspace scan; everything else routes
-    to a single-repo scan; ``"skip"`` returns ``not_a_code_repo``.
-
-    If a live scan already exists for ``path`` (PID-stamp verified),
-    returns *that* scan's URL — same idempotency as
-    ``scan_workspace_async``.
-    """
-    from agent_readiness.enumerate import enumerate_workspace as _enumerate
-
-    p = Path(path).expanduser().resolve()
-    if not p.is_dir():
-        raise ValueError(f"path is not a directory: {p}")
-
-    report = _enumerate(p)
-    hint = report.classification_hint
-
-    if treat_as is not None:
-        normalized = treat_as.strip().lower()
-        if normalized in ("workspace",):
-            action = "scan_workspace_async"
-        elif normalized in ("monorepo", "single_repo", "single"):
-            action = "scan_repo"
-        elif normalized in ("skip", "exit"):
-            action = "exit"
-        else:
-            return {
-                "status": "invalid_input",
-                "error": "invalid_treat_as",
-                "message": (
-                    f"unknown treat_as={treat_as!r}; valid: "
-                    "'workspace', 'monorepo', 'single_repo', 'skip'"
-                ),
-            }
-    else:
-        action = hint.recommended_action if hint else "scan_workspace_async"
-
-    if action == "exit":
-        return {
-            "status": "not_a_code_repo",
-            "message": (
-                "This path is not a code repository. Tell the user and stop."
-            ),
-            "rationale": hint.rationale if hint else "no .git, no README",
-        }
-
-    if action == "ask_user":
-        assert hint is not None  # ask_user only comes from a real hint
-        return {
-            "status": "needs_disambiguation",
-            "ambiguity_reason": hint.ambiguity_reason,
-            "ambiguity_options": hint.ambiguity_options,
-            "rationale": hint.rationale,
-            "guidance": (
-                "Paint ambiguity_reason and ambiguity_options into a chat "
-                "prompt verbatim. After the user picks, re-call "
-                "scan_and_view(path, treat_as=<option.id>). Do not "
-                "improvise wording, do not read READMEs to double-check."
-            ),
-        }
-
-    if action == "scan_workspace_async":
-        children: list[str] = [
-            str(c.path) for c in report.children if c.has_git
-        ]
-        if not children:
-            # Defensive: classifier said workspace but no children with .git
-            # (shouldn't happen given the rubric, but don't strand the user).
-            children = [str(p)]
-    else:
-        # scan_repo: workspace of one — the dashboard renders a single
-        # card and the underlying engine scans the root as a child.
-        children = [str(p)]
-
-    return scan_workspace_async(str(p), children=children)
 
 
 def _live_dashboard_url(base_url: str, scan_id: str) -> str:
@@ -925,36 +751,76 @@ def serve(transport: str = "stdio") -> None:
         return json.dumps(envelope, indent=2)
 
     @server.tool()
-    def scan_workspace_tool(
-        path: str,
-        select: list[str] | None = None,
-    ) -> str:
-        """Scan every detected repo in a workspace, or a named subset.
+    def scan_workspace_tool(path: str) -> str:
+        """Score PATH as a workspace of independent repos.
 
-        ``select`` accepts a list of repo names (the ``name`` field
-        from ``detect_workspace_tool``'s ``repos`` array). With
-        ``select=None`` the tool scans everything detected. Names that
-        don't match a detected repo land in ``skipped`` with
-        ``reason="not detected"`` so the caller can surface a clean
-        error.
-        """
-        return json.dumps(scan_workspace(path, select=select), indent=2)
+        Opens the dashboard wizard at ``/#/onboarding/<scan_id>`` with
+        Detected → Pick (flat grid) → Start. All children with .git
+        are pre-selected; user can deselect any before hitting Start.
+
+        For single repos call ``scan_repo_tool``; for monorepos call
+        ``scan_monorepo_tool``."""
+        return json.dumps(scan_workspace(path), indent=2)
+
+    @server.tool()
+    def inspect_tool(path: str) -> str:
+        """Fast pre-flight: enumerate PATH and suggest a workspace type.
+
+        Returns ``InspectResult`` JSON:
+
+          ``{
+            "enumeration": {
+              "root": "...", "root_has_git": bool, "repos": [...],
+              "directories_walked": int, "elapsed_ms": int
+            },
+            "classification": {
+              "suggested_type": "single_repo" | "monorepo" | "workspace",
+              "confidence": "high" | "medium" | "low",
+              "rationale": "..."
+            }
+          }``
+
+        Call this BEFORE picking which scan tool to invoke. Then:
+
+          - ``classification.suggested_type == "single_repo"`` → call
+            ``scan_repo_tool(path)``.
+          - ``classification.suggested_type == "monorepo"`` → call
+            ``scan_monorepo_tool(path)``.
+          - ``classification.suggested_type == "workspace"`` → call
+            ``scan_workspace_tool(path)``.
+
+        Each scan tool opens an onboarding wizard in the browser — the
+        user confirms (and may override the type) before any scan
+        starts. Returns in ~200ms for trees under ~5k directories."""
+        return json.dumps(inspect(path), indent=2)
 
     @server.tool()
     def scan_repo_tool(path: str) -> str:
-        """Scan a repository and return the readiness report JSON.
+        """Score PATH as a single repository — opens the dashboard wizard.
 
-        Raises a structured ``multi_repo_workspace`` error when the
-        path is a multi-repo workspace — switch to
-        ``scan_workspace_tool`` for that case.
-        """
-        try:
-            return json.dumps(scan_repo(path), indent=2)
-        except MultiRepoWorkspaceError as exc:
-            # Surface the structured envelope as the tool's payload so
-            # the client doesn't need exception introspection. The
-            # `error` field disambiguates it from a successful report.
-            return json.dumps(exc.payload, indent=2)
+        Returns immediately with an ``onboarding_required`` envelope and
+        a ``dashboard_url`` pointing at ``/#/onboarding/<scan_id>``. The
+        wizard has 2 steps (Detected → Start); user confirms then the
+        scan begins. Share ``dashboard_url`` verbatim with the user and
+        STOP calling tools.
+
+        For monorepos call ``scan_monorepo_tool`` instead; for
+        workspaces call ``scan_workspace_tool``. If you don't know,
+        call ``inspect_tool`` first."""
+        return json.dumps(scan_repo(path), indent=2)
+
+    @server.tool()
+    def scan_monorepo_tool(path: str) -> str:
+        """Score PATH as a monorepo (one .git at root, many packages).
+
+        Opens the dashboard wizard at ``/#/onboarding/<scan_id>`` with
+        Detected → Pick (grouped by parent folder) → Start. All
+        detected sub-packages are pre-selected; user can deselect
+        before hitting Start.
+
+        For single repos call ``scan_repo_tool``; for workspaces of
+        independent repos call ``scan_workspace_tool``."""
+        return json.dumps(scan_monorepo(path), indent=2)
 
     @server.tool()
     def apply_top_action_tool(path: str, run_verify: bool = True) -> str:
@@ -1116,62 +982,6 @@ def serve(transport: str = "stdio") -> None:
     # ----- Plan 3: live-scan tools ---------------------------------------
 
     @server.tool()
-    def scan_and_view_tool(
-        path: str,
-        treat_as: str | None = None,
-    ) -> str:
-        """**THE FRONT-DOOR TOOL — call this first for ANY path.**
-
-        Single-tool entry point. The skill calls this immediately on
-        every user-supplied path; the tool auto-enumerates,
-        auto-classifies, auto-launches the dashboard, and returns the
-        URL within ~2 seconds. The skill makes zero classification
-        decisions and zero pre-flight tool calls.
-
-        Possible return shapes:
-
-          1. ``{"status": "started", "dashboard_url": "...", ...}``
-             — Same envelope as ``scan_workspace_async_tool``. The
-             dashboard is up. Share the URL with the user verbatim
-             and stop calling tools. Works for single repos
-             (one-card workspace), monorepos, and multi-repo
-             workspaces alike.
-
-          2. ``{"status": "needs_disambiguation",
-                "ambiguity_reason": "...",
-                "ambiguity_options": [{"id", "label", "route", "hint"}, ...]}``
-             — Signals are ambiguous (e.g. root has ``.git`` AND
-             children also have ``.git``). The scanner already
-             pre-rendered the chat prompt. Paint it verbatim, get
-             the user's pick, then re-call
-             ``scan_and_view_tool(path, treat_as=<option.id>)``.
-
-          3. ``{"status": "not_a_code_repo", "message": ...}``
-             — No .git, no README, no children. Tell the user, stop.
-
-          4. ``{"status": "invalid_input", ...}`` — bad ``treat_as``
-             value. Surface the error.
-
-        Why this exists: prior to v0.7.4 the skill had to chain
-        ``enumerate_workspace_tool`` → think → pick a scan tool →
-        call it. Three tool calls and two LLM-thinking turns =
-        30+ seconds of latency before the dashboard appears. This
-        tool collapses all of that into one call.
-
-        ``treat_as`` is the disambiguation override (option IDs
-        the scanner pre-renders): ``"workspace"``, ``"monorepo"``,
-        ``"single_repo"``, or ``"skip"``.
-        """
-        try:
-            return json.dumps(scan_and_view(path, treat_as=treat_as), indent=2)
-        except (ValueError, RuntimeError) as exc:
-            return json.dumps({
-                "status": "error",
-                "error": "scan_start_failed",
-                "message": str(exc),
-            })
-
-    @server.tool()
     def scan_workspace_async_tool(
         workspace_path: str,
         children: list[str] | None = None,
@@ -1292,12 +1102,13 @@ __all__ = [
     "detect_workspace",
     "enumerate_workspace",
     "get_scan_status",
+    "inspect",
     "list_friction",
     "list_scans",
     "manifest_validate",
     "ontology",
     "render_workspace_report",
-    "scan_and_view",
+    "scan_monorepo",
     "scan_repo",
     "scan_workspace",
     "scan_workspace_async",
