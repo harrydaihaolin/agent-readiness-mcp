@@ -143,55 +143,27 @@ def check_workspace_readiness(
 
 
 def scan_repo(path: str) -> dict[str, Any]:
-    """Scan ``path`` and return the JSON-serialisable readiness report.
+    """Open the onboarding wizard with type committed as single_repo."""
+    import subprocess
 
-    Includes ``overall_score``, ``pillar_scores``, every check result,
-    and the ``top_action`` pin (the single highest-priority structured
-    fix the engine recommends). Callers chain ``apply_top_action`` to
-    actually land the recommended fix.
-
-    Raises :class:`MultiRepoWorkspaceError` when ``path`` is a multi-repo
-    workspace — same contract as ``agent-readiness scan`` from the CLI
-    (which exits 2 with a structured stderr envelope). Use
-    :func:`scan_workspace` for that case, or :func:`detect_workspace`
-    to enumerate before deciding.
-    """
-    from agent_readiness.context import RepoContext
-    from agent_readiness.rules_eval import evaluate_rules
-    from agent_readiness.rules_runtime import load_default_rules
-    from agent_readiness.scorer import score as score_results
-    from agent_readiness.workspace_detect import detect
-
-    repo = Path(path).expanduser().resolve()
-    if not repo.is_dir():
-        raise ValueError(f"path is not a directory: {repo}")
-
-    classification = detect(repo)
-    if classification.classification == "multi_repo_workspace":
-        raise MultiRepoWorkspaceError({
-            "error": "multi_repo_workspace",
-            "hint": (
-                "this path contains multiple repos; call "
-                "`detect_workspace(path)` to list them or "
-                "`scan_workspace(path, select=[...])` to scan a subset"
-            ),
-            "detected_repos": [r.name for r in classification.repos],
-            "root": classification.root,
-            "version": classification.version,
-        })
-
-    rules = load_default_rules()
-    if not rules:
-        raise RuntimeError(
-            "agent-readiness rules pack is missing; reinstall agent-readiness."
-        )
-    ctx = RepoContext(root=repo)
-    results = []
-    for rule in rules:
-        results.extend(evaluate_rules([rule], ctx))
-    report = score_results(repo, results)
-    report.languages = ctx.detected_languages
-    return report.to_dict()
+    proc = subprocess.run(
+        ["agent-readiness", "scan-repo", path, "--json", "--no-open"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness scan-repo failed",
+            "exit_code": proc.returncode,
+        }
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "error",
+            "error": f"non-JSON output from scan-repo: {exc}",
+            "raw_stdout": proc.stdout,
+        }
 
 
 def scan_workspace(
@@ -999,19 +971,18 @@ def serve(transport: str = "stdio") -> None:
 
     @server.tool()
     def scan_repo_tool(path: str) -> str:
-        """Scan a repository and return the readiness report JSON.
+        """Score PATH as a single repository — opens the dashboard wizard.
 
-        Raises a structured ``multi_repo_workspace`` error when the
-        path is a multi-repo workspace — switch to
-        ``scan_workspace_tool`` for that case.
-        """
-        try:
-            return json.dumps(scan_repo(path), indent=2)
-        except MultiRepoWorkspaceError as exc:
-            # Surface the structured envelope as the tool's payload so
-            # the client doesn't need exception introspection. The
-            # `error` field disambiguates it from a successful report.
-            return json.dumps(exc.payload, indent=2)
+        Returns immediately with an ``onboarding_required`` envelope and
+        a ``dashboard_url`` pointing at ``/#/onboarding/<scan_id>``. The
+        wizard has 2 steps (Detected → Start); user confirms then the
+        scan begins. Share ``dashboard_url`` verbatim with the user and
+        STOP calling tools.
+
+        For monorepos call ``scan_monorepo_tool`` instead; for
+        workspaces call ``scan_workspace_tool``. If you don't know,
+        call ``inspect_tool`` first."""
+        return json.dumps(scan_repo(path), indent=2)
 
     @server.tool()
     def apply_top_action_tool(path: str, run_verify: bool = True) -> str:

@@ -608,3 +608,20 @@ def test_inspect_tool_returns_inspect_result_json(tmp_path, monkeypatch):
     assert "enumeration" in result
     assert "classification" in result
     assert result["classification"]["suggested_type"] == "single_repo"
+
+
+def test_scan_repo_tool_returns_onboarding_required_envelope(tmp_path, monkeypatch):
+    """The new scan_repo_tool opens the dashboard wizard rather than
+    returning a sync scan result."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from agent_readiness_mcp.server import scan_repo as scan_repo_callable
+
+    target = tmp_path / "demo"
+    target.mkdir()
+    (target / ".git").mkdir()
+
+    result = scan_repo_callable(str(target))
+    assert result["status"] == "onboarding_required"
+    assert result["type"] == "single_repo"
+    assert "/onboarding/" in result["dashboard_url"]
