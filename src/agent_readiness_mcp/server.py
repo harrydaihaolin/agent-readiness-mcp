@@ -435,6 +435,31 @@ def ontology(subcmd: str, arguments: dict[str, Any] | None = None) -> dict[str, 
 # ---------- live scan tools (Plan 3) --------------------------------------
 
 
+def inspect(path: str) -> dict[str, Any]:
+    """Run `agent-readiness inspect <path> --json` and return the parsed
+    envelope as a dict. Used by the MCP `inspect_tool` wrapper."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["agent-readiness", "inspect", path, "--json"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness inspect failed",
+            "exit_code": proc.returncode,
+        }
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "error",
+            "error": f"non-JSON output from inspect: {exc}",
+            "raw_stdout": proc.stdout,
+        }
+
+
 def scan_workspace_async(
     workspace_path: str,
     children: list[str] | None = None,
@@ -941,6 +966,38 @@ def serve(transport: str = "stdio") -> None:
         return json.dumps(scan_workspace(path, select=select), indent=2)
 
     @server.tool()
+    def inspect_tool(path: str) -> str:
+        """Fast pre-flight: enumerate PATH and suggest a workspace type.
+
+        Returns ``InspectResult`` JSON:
+
+          ``{
+            "enumeration": {
+              "root": "...", "root_has_git": bool, "repos": [...],
+              "directories_walked": int, "elapsed_ms": int
+            },
+            "classification": {
+              "suggested_type": "single_repo" | "monorepo" | "workspace",
+              "confidence": "high" | "medium" | "low",
+              "rationale": "..."
+            }
+          }``
+
+        Call this BEFORE picking which scan tool to invoke. Then:
+
+          - ``classification.suggested_type == "single_repo"`` → call
+            ``scan_repo_tool(path)``.
+          - ``classification.suggested_type == "monorepo"`` → call
+            ``scan_monorepo_tool(path)``.
+          - ``classification.suggested_type == "workspace"`` → call
+            ``scan_workspace_tool(path)``.
+
+        Each scan tool opens an onboarding wizard in the browser — the
+        user confirms (and may override the type) before any scan
+        starts. Returns in ~200ms for trees under ~5k directories."""
+        return json.dumps(inspect(path), indent=2)
+
+    @server.tool()
     def scan_repo_tool(path: str) -> str:
         """Scan a repository and return the readiness report JSON.
 
@@ -1292,6 +1349,7 @@ __all__ = [
     "detect_workspace",
     "enumerate_workspace",
     "get_scan_status",
+    "inspect",
     "list_friction",
     "list_scans",
     "manifest_validate",

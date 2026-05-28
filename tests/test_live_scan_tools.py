@@ -593,3 +593,18 @@ def test_scan_and_view_invalid_treat_as_returns_error(tmp_path):
 def test_scan_and_view_rejects_non_directory(tmp_path):
     with pytest.raises(ValueError):
         scan_and_view(str(tmp_path / "does-not-exist"))
+
+
+def test_inspect_tool_returns_inspect_result_json(tmp_path, monkeypatch):
+    """`inspect_tool(path)` shells out to `agent-readiness inspect` and
+    returns the JSON envelope verbatim."""
+    from agent_readiness_mcp.server import inspect as inspect_callable
+
+    target = tmp_path / "demo"
+    target.mkdir()
+    (target / ".git").mkdir()
+
+    result = inspect_callable(str(target))
+    assert "enumeration" in result
+    assert "classification" in result
+    assert result["classification"]["suggested_type"] == "single_repo"
