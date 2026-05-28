@@ -183,107 +183,21 @@ def scan_monorepo(path: str) -> dict[str, Any]:
     return json.loads(proc.stdout)
 
 
-def scan_workspace(
-    path: str,
-    select: list[str] | None = None,
-) -> dict[str, Any]:
-    """Scan every detected repo in a multi-repo workspace (or a subset).
+def scan_workspace(path: str) -> dict[str, Any]:
+    """Open the onboarding wizard with type committed as workspace."""
+    import subprocess
 
-    On a single-repo or monorepo classification, returns a single-entry
-    ``scanned`` list — same wire shape, so the skill can branch only on
-    the ``classification`` field instead of dispatching to two tools.
-
-    Selection rules:
-
-    * ``select=None`` → scan everything detected.
-    * ``select=[name, ...]`` → scan only the named repos. Names that
-      don't match any detected repo land in ``skipped`` with
-      ``reason="not detected"`` rather than failing the whole call —
-      the skill is the right place to surface the user-facing error.
-    """
-    from agent_readiness.workspace_detect import detect
-
-    root = Path(path).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"path is not a directory: {root}")
-
-    classification = detect(root)
-    detected_by_name: dict[str, dict[str, Any]] = {}
-    for r in classification.repos:
-        detected_by_name[r.name] = {
-            "name": r.name,
-            "path": r.path,
-            "rel_path": r.rel_path,
-            "display_name": r.display_name,
+    proc = subprocess.run(
+        ["agent-readiness", "scan-workspace", path, "--json", "--no-open"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness scan-workspace failed",
+            "exit_code": proc.returncode,
         }
-
-    if select is None:
-        chosen = list(detected_by_name.keys())
-        unmatched: list[str] = []
-    else:
-        chosen = [n for n in select if n in detected_by_name]
-        unmatched = [n for n in select if n not in detected_by_name]
-
-    scanned: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for name in detected_by_name:
-        if name not in chosen:
-            skipped.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "reason": "not in select list",
-            })
-            continue
-        repo_path = detected_by_name[name]["path"]
-        try:
-            report = scan_repo(repo_path)
-        except MultiRepoWorkspaceError as exc:
-            # Nested multi_repo_workspace under a multi-repo root —
-            # spec non-goal but defensive: skip rather than recurse.
-            skipped.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "reason": "nested multi_repo_workspace",
-                "detail": exc.payload,
-            })
-        except Exception as exc:
-            skipped.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "reason": "scan_failed",
-                "detail": str(exc),
-            })
-        else:
-            scanned.append({
-                "name": name,
-                "rel_path": detected_by_name[name]["rel_path"],
-                "display_name": detected_by_name[name]["display_name"],
-                "report": report,
-            })
-
-    for name in unmatched:
-        skipped.append({
-            "name": name,
-            "rel_path": None,
-            "reason": "not detected",
-        })
-
-    return {
-        "version": classification.version,
-        "root": classification.root,
-        "classification": classification.classification,
-        "scanned": scanned,
-        "skipped": skipped,
-        "drift_warnings": [
-            {
-                "kind": w.kind,
-                "agents_md_path": w.agents_md_path,
-                "detected_path": w.detected_path,
-                "message": w.message,
-            }
-            for w in classification.drift_warnings
-        ],
-    }
+    return json.loads(proc.stdout)
 
 
 def apply_top_action(path: str, run_verify: bool = True) -> dict[str, Any]:
@@ -939,20 +853,16 @@ def serve(transport: str = "stdio") -> None:
         return json.dumps(envelope, indent=2)
 
     @server.tool()
-    def scan_workspace_tool(
-        path: str,
-        select: list[str] | None = None,
-    ) -> str:
-        """Scan every detected repo in a workspace, or a named subset.
+    def scan_workspace_tool(path: str) -> str:
+        """Score PATH as a workspace of independent repos.
 
-        ``select`` accepts a list of repo names (the ``name`` field
-        from ``detect_workspace_tool``'s ``repos`` array). With
-        ``select=None`` the tool scans everything detected. Names that
-        don't match a detected repo land in ``skipped`` with
-        ``reason="not detected"`` so the caller can surface a clean
-        error.
-        """
-        return json.dumps(scan_workspace(path, select=select), indent=2)
+        Opens the dashboard wizard at ``/#/onboarding/<scan_id>`` with
+        Detected → Pick (flat grid) → Start. All children with .git
+        are pre-selected; user can deselect any before hitting Start.
+
+        For single repos call ``scan_repo_tool``; for monorepos call
+        ``scan_monorepo_tool``."""
+        return json.dumps(scan_workspace(path), indent=2)
 
     @server.tool()
     def inspect_tool(path: str) -> str:

@@ -641,3 +641,20 @@ def test_scan_monorepo_tool_returns_committed_type_monorepo(tmp_path, monkeypatc
     result = scan_monorepo_callable(str(target))
     assert result["status"] == "onboarding_required"
     assert result["type"] == "monorepo"
+
+
+def test_scan_workspace_tool_returns_onboarding_required(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from agent_readiness_mcp.server import scan_workspace as scan_workspace_callable
+
+    target = tmp_path / "demo"
+    target.mkdir()
+    (target / "alpha").mkdir()
+    (target / "alpha" / ".git").mkdir()
+    (target / "beta").mkdir()
+    (target / "beta" / ".git").mkdir()
+
+    result = scan_workspace_callable(str(target))
+    assert result["status"] == "onboarding_required"
+    assert result["type"] == "workspace"
