@@ -625,3 +625,19 @@ def test_scan_repo_tool_returns_onboarding_required_envelope(tmp_path, monkeypat
     assert result["status"] == "onboarding_required"
     assert result["type"] == "single_repo"
     assert "/onboarding/" in result["dashboard_url"]
+
+
+def test_scan_monorepo_tool_returns_committed_type_monorepo(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from agent_readiness_mcp.server import scan_monorepo as scan_monorepo_callable
+
+    target = tmp_path / "demo"
+    target.mkdir()
+    (target / ".git").mkdir()
+    (target / "pkg-a").mkdir()
+    (target / "pkg-a" / ".git").mkdir()
+
+    result = scan_monorepo_callable(str(target))
+    assert result["status"] == "onboarding_required"
+    assert result["type"] == "monorepo"

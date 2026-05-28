@@ -166,6 +166,23 @@ def scan_repo(path: str) -> dict[str, Any]:
         }
 
 
+def scan_monorepo(path: str) -> dict[str, Any]:
+    """Open the onboarding wizard with type committed as monorepo."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["agent-readiness", "scan-monorepo", path, "--json", "--no-open"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": proc.stderr.strip() or "agent-readiness scan-monorepo failed",
+            "exit_code": proc.returncode,
+        }
+    return json.loads(proc.stdout)
+
+
 def scan_workspace(
     path: str,
     select: list[str] | None = None,
@@ -985,6 +1002,19 @@ def serve(transport: str = "stdio") -> None:
         return json.dumps(scan_repo(path), indent=2)
 
     @server.tool()
+    def scan_monorepo_tool(path: str) -> str:
+        """Score PATH as a monorepo (one .git at root, many packages).
+
+        Opens the dashboard wizard at ``/#/onboarding/<scan_id>`` with
+        Detected → Pick (grouped by parent folder) → Start. All
+        detected sub-packages are pre-selected; user can deselect
+        before hitting Start.
+
+        For single repos call ``scan_repo_tool``; for workspaces of
+        independent repos call ``scan_workspace_tool``."""
+        return json.dumps(scan_monorepo(path), indent=2)
+
+    @server.tool()
     def apply_top_action_tool(path: str, run_verify: bool = True) -> str:
         """Apply the top_action pinned by a fresh scan of ``path``.
 
@@ -1327,6 +1357,7 @@ __all__ = [
     "ontology",
     "render_workspace_report",
     "scan_and_view",
+    "scan_monorepo",
     "scan_repo",
     "scan_workspace",
     "scan_workspace_async",
