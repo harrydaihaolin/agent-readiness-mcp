@@ -23,7 +23,7 @@ dependencies = [
     # prompts.jsonl + SSE/JSON endpoints on the scan-and-view server)
     # that get_scan_status's sse_url / snapshot_url / prompts_pending_count
     # / mode_exit_requested fields expose to coding agents.
-    "agent-readiness>=4.0.0,<5.0.0",
+    "agent-readiness>=4.1.0,<5.0.0",
     "mcp>=1.0.0",
 ]
 
