@@ -611,6 +611,37 @@ def list_scans() -> dict[str, Any]:
     return _discovery.list_scans()
 
 
+def get_pending_intents() -> dict[str, Any]:
+    """List queued (pending) scan intents the dashboard has posted."""
+    from agent_readiness.live_scan.intents import list_intents
+    return {"intents": list_intents(status="pending")}
+
+
+def claim_intent(intent_id: str) -> dict[str, Any]:
+    """Atomically claim a pending intent so the watch loop owns it.
+
+    Returns ``{"ok": True, "intent": {...}}`` or ``{"ok": False,
+    "intent": None}`` when the intent is missing or already claimed-and-fresh.
+    """
+    from agent_readiness.live_scan.intents import claim_intent as _claim
+    rec = _claim(intent_id)
+    if rec is None:
+        return {"ok": False, "intent": None}
+    return {"ok": True, "intent": rec}
+
+
+def ack_intent(intent_id: str, status: str, result=None) -> dict[str, Any]:
+    """Mark an intent done|failed after executing it.
+
+    Returns ``{"ok": bool, "intent": {...} | None}``.
+    """
+    from agent_readiness.live_scan.intents import ack_intent as _ack
+    rec = _ack(intent_id, status, result=result)
+    if rec is None:
+        return {"ok": False, "intent": None}
+    return {"ok": True, "intent": rec}
+
+
 def render_workspace_report(
     workspace_path: str,
     scan_id: str | None = None,
@@ -1068,6 +1099,30 @@ def serve(transport: str = "stdio") -> None:
     def list_scans_tool() -> str:
         """Enumerate active + recent scans across every workspace."""
         return json.dumps(list_scans(), indent=2)
+
+    @server.tool()
+    def get_pending_intents_tool() -> str:
+        """List queued (pending) scan intents posted from the dashboard.
+
+        Use this from a watch loop: for each intent, claim_intent_tool, then
+        dispatch (start -> inspect + scan_*, stop -> stop_scan), then
+        ack_intent_tool with the outcome."""
+        return json.dumps(get_pending_intents(), indent=2)
+
+    @server.tool()
+    def claim_intent_tool(intent_id: str) -> str:
+        """Atomically claim a pending intent before executing it, so two
+        overlapping loop ticks can't double-run the same intent."""
+        return json.dumps(claim_intent(intent_id), indent=2)
+
+    @server.tool()
+    def ack_intent_tool(
+        intent_id: str, status: str, result: dict | None = None
+    ) -> str:
+        """Mark an intent done|failed after executing it. ``status`` must be
+        'done' or 'failed'; ``result`` can carry e.g.
+        {"dashboard_url": "..."}."""
+        return json.dumps(ack_intent(intent_id, status, result=result), indent=2)
 
     @server.tool()
     def render_workspace_report_tool(
