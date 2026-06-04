@@ -29,51 +29,54 @@ Do not touch these without an explicit ask:
 
 Entry points: `agent-readiness-mcp` (server). Tests live under `tests/`.
 
-## Live scan tools (Plan 3)
+## Headless, prompt-only (v0.9.0)
 
-Five additional tools surface Plan 1's progressive scan + render
-infrastructure. Each is a thin wrapper over the agent-readiness CLI;
-state lives entirely in `~/.agent-readiness/scans/`, not in the MCP
-server process.
+This server has **no dashboard and no live-scan process**. Every scan
+runs synchronously in-process and returns its report inline in chat.
+The dashboard / live-scan tools (`scan_workspace_async_tool`,
+`get_scan_status_tool`, `stop_scan_tool`, `list_scans_tool`,
+`render_workspace_report_tool`) and the redundant
+`check_workspace_readiness_tool` were removed in v0.9.0. Do not
+re-add a browser surface here — prompt generation is the contract.
 
-### `scan_workspace_async_tool(workspace_path, children?)`
+## Scan tools
 
-Kick off `agent-readiness scan-and-view` as a detached subprocess.
-Returns within ~2 seconds with `{ dashboard_url, scan_id, pid, ... }`.
-The agent should share `dashboard_url` with the user. The scan runs
-in the background; poll `get_scan_status_tool` before reading final
-results. If a live scan already exists for `workspace_path`, returns
-that scan's URL instead of starting a new one.
+### `inspect_tool(path)`
 
-### `get_scan_status_tool(scan_id)`
+Fast (~200ms) pre-flight. Returns `{ enumeration, classification }`
+where `classification.suggested_type` is `single_repo` / `monorepo` /
+`workspace`. Always call this first to pick the scan tool.
 
-Return current status for a scan: `{ scan_id, status, progress,
-dashboard_url, overall_score, completed_at }`. Cheap; safe to call
-repeatedly.
+### `scan_repo_tool(path)` / `scan_monorepo_tool(path)`
 
-### `stop_scan_tool(scan_id | "all")`
+Score one repository in-process and return the `ReadinessReport` JSON
+inline (`overall_score`, `pillars`, `top_action`). `scan_repo_tool`
+returns the structured `multi_repo_workspace` payload if the path holds
+several repos.
 
-Stop one scan or every running scan. PID-stamp verifies before SIGTERM;
-mismatched stamps are skipped. Returns `{ ok, killed: [...], skipped: [...] }`.
+### `scan_workspace_tool(path, children)`
 
-### `list_scans_tool()`
+Score a workspace of independent repos. `children` is the list of
+`.git` repo paths (from `inspect`'s `enumeration.repos`). Returns the
+5-pillar `WorkspaceReadinessReport` inline — the fifth pillar,
+Coordination, is workspace-only and its `top_action.fix_prompt` is the
+paste-ready coordination prompt to surface to the user.
 
-Enumerate active + recent scans across every workspace under
-`~/.agent-readiness/scans/`. Returns `{ active, recent, total_disk_bytes }`.
+### `list_friction_tool(path)` / `apply_top_action_tool(path)`
 
-### `render_workspace_report_tool(workspace_path, scan_id?, output_dir?)`
-
-Render a scan as a portable static directory. Returns
-`{ index_path, output_dir, source_status, ... }`. Share `index_path`
-with the user; if `file://` routing fails (browser CORS on some
-setups), suggest `python -m http.server` in the output dir.
+`list_friction_tool` returns every WARN/ERROR finding with its
+paste-ready `fix_prompt` (sorted by impact). `apply_top_action_tool`
+lands the single highest-impact structured fix.
 
 ## Standard agent workflow
 
-1. `scan_workspace_async_tool(path)` → share `dashboard_url` with the user
-2. Continue with other tasks
-3. Later: `get_scan_status_tool(scan_id)` → check completion
-4. If user wants a shareable artifact: `render_workspace_report_tool(path)`
+1. `inspect_tool(path)` → read `classification.suggested_type`.
+2. Call exactly one of `scan_repo_tool` / `scan_monorepo_tool` /
+   `scan_workspace_tool(path, children)`.
+3. Present the score + the generated `fix_prompt`s in chat
+   (`list_friction_tool` for single/monorepo; the workspace
+   `top_action` for workspaces).
+4. Offer `apply_top_action_tool` or to write a root `AGENTS.md`.
 
 ## Reporting issues
 

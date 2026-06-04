@@ -4,25 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-readiness-mcp"
-version = "0.8.0"
-description = "MCP server exposing agent-readiness scan, detect, and apply tools to coding agents."
+version = "0.9.0"
+description = "Headless, prompt-only MCP server exposing agent-readiness inspect, scan, and apply tools to coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Harry Dai" }]
 keywords = ["mcp", "agents", "agent-readiness", "claude", "cursor"]
 dependencies = [
-    # 2.5.0 is the engine release that ships the workspace_detect
-    # module + the detect_v1 envelope. detect_workspace and
-    # scan_workspace import directly from that module; scan_repo
-    # surfaces its structured `multi_repo_workspace` error.
-    # 3.0.4+ adds the `live_scan` package, `render` module, and the
-    # `scan-and-view`/`scan-status`/`scan-stop`/`scan-list`/`render-report`
-    # CLI commands that the live-scan tools wrap.
-    # 3.4.0+ adds the Bundle D live-dashboard surface (events.jsonl +
-    # prompts.jsonl + SSE/JSON endpoints on the scan-and-view server)
-    # that get_scan_status's sse_url / snapshot_url / prompts_pending_count
-    # / mode_exit_requested fields expose to coding agents.
+    # The server is headless and prompt-only: every scan returns its
+    # report inline (no dashboard / live-scan subprocess). It uses the
+    # engine's in-process scoring API (context / rules_eval /
+    # rules_runtime / scorer) plus workspace_detect, enumerate, and
+    # workspace_scan, and the `inspect` CLI for the fast pre-flight.
     "agent-readiness>=4.1.0,<5.0.0",
     "mcp>=1.0.0",
 ]

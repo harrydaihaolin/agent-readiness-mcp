@@ -2,14 +2,14 @@
 
 These tests exercise the wrappers, not the MCP transport — the
 transport is provided by the official ``mcp`` SDK and is well-tested
-upstream. ``scan_repo`` / ``scan_workspace`` (v0.8.0+) launch the
-onboarding wizard via the CLI; sync scan envelopes are covered by
-``check_workspace_readiness`` and the live-scan tool tests.
+upstream. The server is headless and prompt-only (v0.9.0+):
+``scan_repo`` / ``scan_monorepo`` return the ReadinessReport inline,
+and the workspace scan is exposed via ``check_workspace_readiness``
+(see ``test_workspace_tools.py``).
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,29 +19,42 @@ from agent_readiness_mcp.server import (
     apply_top_action,
     detect_workspace,
     list_friction,
+    scan_monorepo,
     scan_repo,
-    scan_workspace,
 )
 
 
-def test_scan_repo_returns_onboarding_envelope(monkeypatch):
-    """v0.8.0: scan_repo opens the onboarding wizard, not a sync report."""
+def test_scan_repo_returns_readiness_report(monkeypatch):
+    """v0.9.0: scan_repo returns the ReadinessReport inline (no dashboard)."""
     with TemporaryDirectory() as td:
         monkeypatch.setenv("HOME", td)
         repo = Path(td)
         (repo / ".git").mkdir()
+        (repo / "README.md").write_text("# repo\n")
         report = scan_repo(str(repo))
-        assert report["status"] == "onboarding_required"
-        assert report["type"] == "single_repo"
-        assert "/onboarding/" in report["dashboard_url"]
+        assert "overall_score" in report
+        assert "pillars" in report
+        assert "top_action" in report
+        # Headless: no dashboard handles in the envelope.
+        assert "dashboard_url" not in report
+        assert report.get("status") != "onboarding_required"
+
+
+def test_scan_monorepo_returns_readiness_report(monkeypatch):
+    """scan_monorepo scores the root as one repo and returns the report."""
+    with TemporaryDirectory() as td:
+        monkeypatch.setenv("HOME", td)
+        repo = Path(td)
+        (repo / ".git").mkdir()
+        (repo / "README.md").write_text("# monorepo\n")
+        report = scan_monorepo(str(repo))
+        assert "overall_score" in report
+        assert "pillars" in report
 
 
 def test_scan_repo_rejects_nonexistent_path():
-    with TemporaryDirectory() as td:
-        os.environ.setdefault("HOME", td)
-        result = scan_repo("/this/path/does/not/exist/xyz")
-        assert result["status"] == "error"
-        assert result["exit_code"] == 2
+    with pytest.raises(ValueError, match="not a directory"):
+        scan_repo("/this/path/does/not/exist/xyz")
 
 
 def test_apply_top_action_returns_result_envelope():
@@ -126,14 +139,17 @@ def test_detect_workspace_rejects_nonexistent_path():
         detect_workspace("/this/path/does/not/exist/xyz")
 
 
-def test_scan_workspace_returns_onboarding_envelope(monkeypatch):
-    """v0.8.0: scan_workspace opens the onboarding wizard."""
+def test_scan_repo_raises_on_multi_repo_workspace(monkeypatch):
+    """scan_repo refuses a multi-repo workspace with a structured payload."""
+    from agent_readiness_mcp.server import MultiRepoWorkspaceError
+
     with TemporaryDirectory() as td:
         monkeypatch.setenv("HOME", td)
         root = Path(td)
         for name in ("alpha", "beta"):
             (root / name).mkdir()
             (root / name / ".git").mkdir()
-        result = scan_workspace(str(root))
-        assert result["status"] == "onboarding_required"
-        assert result["type"] == "workspace"
+        with pytest.raises(MultiRepoWorkspaceError) as excinfo:
+            scan_repo(str(root))
+        assert excinfo.value.payload["error"] == "multi_repo_workspace"
+        assert sorted(excinfo.value.payload["detected_repos"]) == ["alpha", "beta"]

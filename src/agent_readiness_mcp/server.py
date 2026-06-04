@@ -1,12 +1,18 @@
 """MCP server core.
 
-The server exposes eight tools backed by the agent-readiness engine:
+The server is **headless and prompt-only**: every scan returns its
+report inline in chat — there is no browser, no dashboard, and no
+background live-scan process. The core tools backed by the
+agent-readiness engine are:
 
+* ``inspect(path)``                        -> InspectResult (enumeration
+                                              + suggested workspace type)
 * ``detect_workspace(path)``               -> detect_v1 envelope
 * ``enumerate_workspace(path)``            -> static enumeration envelope
-* ``scan_workspace(path, select)``         -> multi-repo scan envelope
-* ``check_workspace_readiness(path, sel)`` -> workspace_readiness envelope
 * ``scan_repo(path)``                      -> ReadinessReport JSON envelope
+* ``scan_monorepo(path)``                  -> ReadinessReport JSON envelope
+* ``check_workspace_readiness(path, sel)`` -> workspace_readiness envelope
+                                              (exposed as scan_workspace_tool)
 * ``apply_top_action(path, verify)``       -> ApplyResult JSON envelope
 * ``list_friction(path)``                  -> list of {rule_id, severity,
                                               message, fix_prompt, verify}
@@ -14,23 +20,21 @@ The server exposes eight tools backed by the agent-readiness engine:
                                               JSON envelope (workspace
                                               bible loader + validator)
 
-``detect_workspace`` and ``scan_workspace`` ship in v0.2.0 alongside
-agent-readiness 2.5.0's workspace-detection module. ``scan_repo`` was
-backwards-compatible with single-repo and monorepo paths from day one
-and now also surfaces the engine's new structured ``multi_repo_workspace``
-error to the caller instead of silently scoring the parent dir.
+The typical flow is ``inspect`` → exactly one of ``scan_repo`` /
+``scan_monorepo`` / ``scan_workspace_tool(path, children)`` → present
+the score and the engine-generated ``fix_prompt``s (via
+``list_friction`` / the workspace ``top_action``) in chat → optionally
+``apply_top_action``.
 
-``apply_top_action`` acts on the single highest-impact item;
-``list_friction`` returns every actionable item with its paste-ready
-agent prompt so an in-IDE caller can iterate item-by-item instead of
-chaining one top-action at a time.
+``scan_repo`` / ``scan_monorepo`` score one repository in-process and
+surface the engine's structured ``multi_repo_workspace`` error rather
+than silently scoring a parent dir. ``apply_top_action`` acts on the
+single highest-impact item; ``list_friction`` returns every actionable
+item with its paste-ready agent prompt so the caller can iterate
+item-by-item.
 
 All calls are synchronous and bounded by the engine's own runtime
-budget; we don't wrap them in extra background tasks because the MCP
-client surfaces a long-running indicator natively. ``scan_workspace``
-fans out sequentially in v1 — parallel execution is a follow-up
-gated by demand, because 17 sequential scans (our biggest known
-workspace) take ~10s end-to-end on the reference cohort.
+budget. The workspace scan fans out over children sequentially.
 
 Implementation notes:
 
@@ -47,10 +51,6 @@ Implementation notes:
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -142,62 +142,81 @@ def check_workspace_readiness(
     return _scan(root, children).to_dict()
 
 
-def scan_repo(path: str) -> dict[str, Any]:
-    """Open the onboarding wizard with type committed as single_repo."""
-    import subprocess
+def _score_repo(repo: Path) -> dict[str, Any]:
+    """Run the rules engine over ``repo`` and return the ReadinessReport dict.
 
-    proc = subprocess.run(
-        ["agent-readiness", "scan-repo", path, "--json", "--no-open"],
-        capture_output=True, text=True, check=False, timeout=30,
-    )
-    if proc.returncode != 0:
-        return {
-            "status": "error",
-            "error": proc.stderr.strip() or "agent-readiness scan-repo failed",
-            "exit_code": proc.returncode,
-        }
-    try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        return {
-            "status": "error",
-            "error": f"non-JSON output from scan-repo: {exc}",
-            "raw_stdout": proc.stdout,
-        }
+    Headless and in-process — no dashboard, no subprocess. The returned
+    dict carries ``overall_score``, ``pillar_scores``, every ``pillars[]``
+    entry (with ``checks[].findings[]`` and ``fix_prompt``), and the
+    ``top_action`` pin. ``list_friction`` and ``apply_top_action`` read
+    those fields directly.
+    """
+    from agent_readiness.context import RepoContext
+    from agent_readiness.rules_eval import evaluate_rules
+    from agent_readiness.rules_runtime import load_default_rules
+    from agent_readiness.scorer import score as score_results
+
+    rules = load_default_rules()
+    if not rules:
+        raise RuntimeError(
+            "agent-readiness rules pack is missing; reinstall agent-readiness."
+        )
+    ctx = RepoContext(root=repo)
+    results = []
+    for rule in rules:
+        results.extend(evaluate_rules([rule], ctx))
+    report = score_results(repo, results)
+    report.languages = ctx.detected_languages
+    return report.to_dict()
+
+
+def scan_repo(path: str) -> dict[str, Any]:
+    """Scan ``path`` as a single repo and return the readiness report inline.
+
+    Headless: no browser, no dashboard. Returns the JSON-serialisable
+    ReadinessReport (``overall_score``, ``pillar_scores``, every check
+    result, and the ``top_action`` pin). Callers chain
+    ``apply_top_action`` to land the recommended fix or ``list_friction``
+    to enumerate every paste-ready ``fix_prompt``.
+
+    Raises :class:`MultiRepoWorkspaceError` when ``path`` is a multi-repo
+    workspace — same contract as ``agent-readiness scan`` from the CLI.
+    Use :func:`scan_monorepo` for a one-git-root monorepo, or
+    :func:`check_workspace_readiness` for a workspace of independents.
+    """
+    from agent_readiness.workspace_detect import detect
+
+    repo = Path(path).expanduser().resolve()
+    if not repo.is_dir():
+        raise ValueError(f"path is not a directory: {repo}")
+
+    classification = detect(repo)
+    if classification.classification == "multi_repo_workspace":
+        raise MultiRepoWorkspaceError({
+            "error": "multi_repo_workspace",
+            "hint": (
+                "this path contains multiple repos; call "
+                "`detect_workspace(path)` to list them, or "
+                "`scan_workspace_tool(path, children=[...])` to scan them"
+            ),
+            "detected_repos": [r.name for r in classification.repos],
+            "root": classification.root,
+            "version": classification.version,
+        })
+    return _score_repo(repo)
 
 
 def scan_monorepo(path: str) -> dict[str, Any]:
-    """Open the onboarding wizard with type committed as monorepo."""
-    import subprocess
+    """Scan ``path`` as a monorepo (one .git at root) and return the report.
 
-    proc = subprocess.run(
-        ["agent-readiness", "scan-monorepo", path, "--json", "--no-open"],
-        capture_output=True, text=True, check=False, timeout=30,
-    )
-    if proc.returncode != 0:
-        return {
-            "status": "error",
-            "error": proc.stderr.strip() or "agent-readiness scan-monorepo failed",
-            "exit_code": proc.returncode,
-        }
-    return json.loads(proc.stdout)
-
-
-def scan_workspace(path: str) -> dict[str, Any]:
-    """Open the onboarding wizard with type committed as workspace."""
-    import subprocess
-
-    proc = subprocess.run(
-        ["agent-readiness", "scan-workspace", path, "--json", "--no-open"],
-        capture_output=True, text=True, check=False, timeout=30,
-    )
-    if proc.returncode != 0:
-        return {
-            "status": "error",
-            "error": proc.stderr.strip() or "agent-readiness scan-workspace failed",
-            "exit_code": proc.returncode,
-        }
-    return json.loads(proc.stdout)
+    Headless, like :func:`scan_repo`, but skips the multi-repo guard:
+    the caller has already classified ``path`` as a monorepo (via
+    ``inspect``), so the root is scored directly as one repository.
+    """
+    repo = Path(path).expanduser().resolve()
+    if not repo.is_dir():
+        raise ValueError(f"path is not a directory: {repo}")
+    return _score_repo(repo)
 
 
 def apply_top_action(path: str, run_verify: bool = True) -> dict[str, Any]:
@@ -335,7 +354,7 @@ def ontology(subcmd: str, arguments: dict[str, Any] | None = None) -> dict[str, 
     return TOOL_REGISTRY[subcmd](**args)
 
 
-# ---------- live scan tools (Plan 3) --------------------------------------
+# ---------- inspect (fast pre-flight classifier) --------------------------
 
 
 def inspect(path: str) -> dict[str, Any]:
@@ -361,315 +380,6 @@ def inspect(path: str) -> dict[str, Any]:
             "error": f"non-JSON output from inspect: {exc}",
             "raw_stdout": proc.stdout,
         }
-
-
-def scan_workspace_async(
-    workspace_path: str,
-    children: list[str] | None = None,
-    *,
-    server_url_timeout_s: float = 5.0,
-) -> dict[str, Any]:
-    """Kick off ``agent-readiness scan-and-view`` as a detached subprocess.
-
-    Returns a ``StartedScan`` envelope as soon as ``<scan-dir>/server.url``
-    appears on disk (the CLI writes it once the HTTP server is listening).
-    The CLI process then runs the scan independently of the MCP process.
-
-    If a live scan already exists for ``workspace_path`` (PID-stamp
-    verified), returns *that* scan's URL instead of starting a new one.
-    """
-    from agent_readiness.live_scan.paths import scan_dir
-    from agent_readiness.live_scan.pidfile import PidStatus, verify_pidfile
-
-    ws = Path(workspace_path).expanduser().resolve()
-    if not ws.is_dir():
-        raise ValueError(f"path is not a directory: {ws}")
-    sd = scan_dir(ws)
-    url_file = sd / "server.url"
-    pid_file = sd / "daemon.pid"
-
-    if verify_pidfile(pid_file) is PidStatus.LIVE and url_file.exists():
-        return _started_envelope(ws, sd, url_file, pid_file)
-
-    children = children or [str(ws)]
-    cmd = [
-        sys.executable, "-m", "agent_readiness.cli", "scan-and-view",
-        str(ws), "--children", ",".join(children), "--no-open",
-    ]
-    subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-    deadline = _time.monotonic() + server_url_timeout_s
-    while _time.monotonic() < deadline:
-        if url_file.exists() and pid_file.exists():
-            return _started_envelope(ws, sd, url_file, pid_file)
-        _time.sleep(0.1)
-    raise RuntimeError(
-        f"scan-and-view did not write {url_file} within {server_url_timeout_s}s"
-    )
-
-
-def _live_dashboard_url(base_url: str, scan_id: str) -> str:
-    """Build the URL the user should open in a browser.
-
-    The dashboard SPA uses HashRouter, so the live route lives at
-    ``<base>/#/live/<scan_id>``. The bare base URL renders the old
-    WorkspacesPage which polls a /data/index.json not present in a
-    live scan_dir — that path sits on "Loading workspaces…" forever
-    (bug reported 2026-05-27, v0.7.1 fix).
-    """
-    if not base_url:
-        return ""
-    return f"{base_url}/#/live/{scan_id}"
-
-
-def _started_envelope(
-    ws: Path, sd: Path, url_file: Path, pid_file: Path,
-) -> dict[str, Any]:
-    pid_data = json.loads(pid_file.read_text())
-    live = sd / "live.json"
-    children_total = 0
-    if live.exists():
-        try:
-            children_total = json.loads(live.read_text())["progress"]["total"]
-        except (json.JSONDecodeError, KeyError):
-            pass
-    base_url = url_file.read_text().strip()
-    scan_id = pid_data["scan_id"]
-    return {
-        "status": "started",
-        "dashboard_url": _live_dashboard_url(base_url, scan_id),
-        "scan_id": scan_id,
-        "workspace": str(ws),
-        "children_total": children_total,
-        "eta_minutes_estimate": max(1, children_total * 30 // 60),
-        "pid": pid_data["pid"],
-        "log_tail_file": str(sd / "scan.log"),
-        "guidance": (
-            "Share dashboard_url with the user. "
-            "Poll get_scan_status before reading final results."
-        ),
-    }
-
-
-def get_scan_status(scan_id: str) -> dict[str, Any]:
-    """Return current status for a scan by ``scan_id`` (workspace hash).
-
-    Reads ``live.json`` if present, else ``latest.json``. Cheap and safe
-    to call repeatedly. Returns the dashboard URL when the local server
-    is still running; empty string otherwise.
-
-    Bundle D enrichment (additive — never raises if the new files are
-    absent):
-
-      ``sse_url``               URL to subscribe to the SSE event stream.
-      ``snapshot_url``          URL of the WorkspaceScanSnapshot JSON.
-      ``prompts_pending_count`` count of pending interactive prompts.
-      ``mode_exit_requested``   True when the user clicked Exit Dashboard.
-
-    The skill calls this once per chat turn after handing scanning over
-    to dashboard mode — it does NOT continuously stream from the SSE
-    endpoint, matching the spec § 4 "hands-off skill ↔ dashboard bridge"
-    decision.
-    """
-    from agent_readiness.live_scan.paths import scans_root
-
-    sd = scans_root() / scan_id
-    live = sd / "live.json"
-    latest = sd / "latest.json"
-    target = live if live.exists() else latest if latest.exists() else None
-    if target is None:
-        raise FileNotFoundError(f"no scan data for {scan_id}")
-    env = json.loads(target.read_text())
-    url = ""
-    url_file = sd / "server.url"
-    if url_file.exists():
-        url = url_file.read_text().strip()
-
-    # Bundle D — derive the new fields. All four are safe-on-missing so
-    # this enrichment never breaks callers that hit a scan_dir from a
-    # pre-3.4.0 worker (events.jsonl / prompts.jsonl simply absent).
-    sse_url = f"{url}/sse/scans/{scan_id}" if url else ""
-    snapshot_url = f"{url}/api/scans/{scan_id}/snapshot" if url else ""
-    prompts_pending_count = _count_pending_prompts(sd / "prompts.jsonl")
-    mode_exit_requested = (sd / "exit_requested").exists()
-
-    return {
-        "scan_id": scan_id,
-        "status": env.get("status"),
-        "progress": env.get("progress"),
-        # Bundle D bugfix (v0.7.1): point at the LivePage (HashRouter
-        # route) instead of the bare base URL — the bare URL renders
-        # the legacy WorkspacesPage which polls a missing
-        # /data/index.json and gets stuck on "Loading workspaces…".
-        "dashboard_url": _live_dashboard_url(url, scan_id),
-        "overall_score": env.get("overall_score"),
-        "completed_at": env.get("completed_at"),
-        # Bundle D additive fields:
-        "sse_url": sse_url,
-        "snapshot_url": snapshot_url,
-        "prompts_pending_count": prompts_pending_count,
-        "mode_exit_requested": mode_exit_requested,
-    }
-
-
-def _count_pending_prompts(prompts_file) -> int:
-    """Count prompt_ids in ``prompts.jsonl`` that are still ``pending``.
-
-    A prompt is pending if it has a ``requested`` line and neither an
-    ``answered`` nor an ``expired`` line. Resilient to a missing file
-    (returns 0) and to a torn-tail line (stops at the first JSON parse
-    error, matching the engine's reader contract).
-    """
-    if not prompts_file.exists():
-        return 0
-    states: dict[str, str] = {}
-    try:
-        for raw in prompts_file.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                # Torn line at tail — stop counting, MCP's read isn't
-                # the writer so we don't try to recover further.
-                break
-            pid = obj.get("prompt_id")
-            event = obj.get("event")
-            if not pid or event not in ("requested", "answered", "expired"):
-                continue
-            if event == "requested":
-                states.setdefault(pid, "pending")
-            else:  # answered | expired — both terminate "pending"
-                states[pid] = "closed"
-    except OSError:
-        return 0
-    return sum(1 for s in states.values() if s == "pending")
-
-
-def stop_scan(scan_id: str) -> dict[str, Any]:
-    """Stop a running scan by ``scan_id``, or every scan when ``scan_id="all"``.
-
-    Returns ``{"ok": bool, "killed": [...], "skipped": [...]}``. ``ok=False``
-    only when a specific scan_id can't be found or its pidfile is
-    stale/recycled — never when ``scan_id="all"``.
-    """
-    import signal as _sig
-
-    from agent_readiness.live_scan import discovery as _discovery
-    from agent_readiness.live_scan.paths import scans_root
-    from agent_readiness.live_scan.pidfile import (
-        PidStatus,
-        clear_pidfile,
-        verify_pidfile,
-    )
-
-    if scan_id == "all":
-        result = _discovery.stop_all()
-        return {"ok": True, **result}
-
-    sd = scans_root() / scan_id
-    pid_file = sd / "daemon.pid"
-    status = verify_pidfile(pid_file)
-    if status is PidStatus.MISSING:
-        return {
-            "ok": False,
-            "reason": "not_found",
-            "killed": [],
-            "skipped": [],
-        }
-    if status is PidStatus.LIVE:
-        data = json.loads(pid_file.read_text())
-        try:
-            os.kill(data["pid"], _sig.SIGTERM)
-            return {"ok": True, "killed": [scan_id], "skipped": []}
-        except ProcessLookupError:
-            clear_pidfile(pid_file)
-            return {
-                "ok": False,
-                "reason": "process_disappeared",
-                "killed": [],
-                "skipped": [],
-            }
-    clear_pidfile(pid_file)
-    return {
-        "ok": False,
-        "reason": status.value,
-        "killed": [],
-        "skipped": [{"scan_id": scan_id, "reason": status.value}],
-    }
-
-
-def list_scans() -> dict[str, Any]:
-    """Enumerate active + recent scans across every workspace."""
-    from agent_readiness.live_scan import discovery as _discovery
-    return _discovery.list_scans()
-
-
-def get_pending_intents() -> dict[str, Any]:
-    """List queued (pending) scan intents the dashboard has posted."""
-    from agent_readiness.live_scan.intents import list_intents
-    return {"intents": list_intents(status="pending")}
-
-
-def claim_intent(intent_id: str) -> dict[str, Any]:
-    """Atomically claim a pending intent so the watch loop owns it.
-
-    Returns ``{"ok": True, "intent": {...}}`` or ``{"ok": False,
-    "intent": None}`` when the intent is missing or already claimed-and-fresh.
-    """
-    from agent_readiness.live_scan.intents import claim_intent as _claim
-    rec = _claim(intent_id)
-    if rec is None:
-        return {"ok": False, "intent": None}
-    return {"ok": True, "intent": rec}
-
-
-def ack_intent(intent_id: str, status: str, result=None) -> dict[str, Any]:
-    """Mark an intent done|failed after executing it.
-
-    Returns ``{"ok": bool, "intent": {...} | None}``.
-    """
-    from agent_readiness.live_scan.intents import ack_intent as _ack
-    rec = _ack(intent_id, status, result=result)
-    if rec is None:
-        return {"ok": False, "intent": None}
-    return {"ok": True, "intent": rec}
-
-
-def render_workspace_report(
-    workspace_path: str,
-    scan_id: str | None = None,
-    output_dir: str | None = None,
-) -> dict[str, Any]:
-    """Render a scan as a portable static directory via agent_readiness.render."""
-    from agent_readiness.render import export_report
-
-    out = Path(output_dir).expanduser().resolve() if output_dir else None
-    result = export_report(
-        Path(workspace_path).expanduser().resolve(),
-        scan_id=scan_id,
-        output_dir=out,
-    )
-    return {
-        "status": "rendered",
-        "index_path": str(result.index_path),
-        "output_dir": str(result.output_dir),
-        "scan_id": result.scan_id,
-        "scan_ts": result.scan_ts,
-        "rendered_at": result.rendered_at,
-        "source_status": result.source_status,
-        "guidance": (
-            "Share index_path with the user. If file:// routing fails, "
-            "run `python -m http.server` in output_dir and open "
-            "http://localhost:8000."
-        ),
-    }
 
 
 # ---------- MCP transport layer -------------------------------------------
@@ -708,90 +418,49 @@ def serve(transport: str = "stdio") -> None:
     def enumerate_workspace_tool(path: str) -> str:
         """Enumerate PATH's direct children AND classify the layout.
 
-        Returns the ``EnumerationReport`` JSON envelope. The envelope
-        carries a **``classification_hint``** block (added in
-        agent-readiness 3.4.3) that the caller MUST obey verbatim
-        — do not re-classify in the LLM, do not deliberate, do not
-        read READMEs first. The hint is a pure function of the
-        signals; LLM judgment cannot improve on it and burns wall-clock
-        time.
+        Returns the ``EnumerationReport`` JSON envelope (``root``,
+        ``children[]``, ``manifest_signals``, ``stats``). Prefer
+        ``inspect_tool`` for the fast pre-flight classification used to
+        pick a scan tool; this tool exists for callers that want the
+        richer raw enumeration.
 
-        Read ``envelope["classification_hint"]["recommended_action"]``
-        and act:
+        Once you know the type, chain the matching **headless** scan
+        tool (each returns its report inline, no dashboard):
 
-          - ``"scan_repo"`` → call ``scan_repo_tool(path)``.
-            ``classification`` will be ``single_repo`` or ``monorepo``.
-          - ``"scan_workspace_async"`` → call
-            ``scan_workspace_async_tool(path, children=...)`` (DASHBOARD
-            MODE, the default for multi-repo workspaces). Returns in
-            ~2s with a ``dashboard_url`` to share with the user. Do
-            NOT use ``check_workspace_readiness_tool`` for this case —
-            it is synchronous and blocks the chat for minutes per repo.
-          - ``"ask_user"`` → **STOP. Do not scan.** Signals are
-            ambiguous from data alone (e.g. root has ``.git`` AND
-            children also have ``.git`` — could be a workspace nested
-            in a meta-repo, a monorepo with submodules, or a single
-            repo with unrelated sub-checkouts). The envelope carries
-            pre-rendered ``ambiguity_reason`` and ``ambiguity_options``
-            ``[{id, label, route, hint}]`` — paint them into a chat
-            prompt verbatim, wait for the user to pick, then chain
-            the matching ``route`` (``scan_repo`` or
-            ``scan_workspace_async``).
-          - ``"exit"`` → not a code repo. Tell the user, do not scan.
-
-        ``classification_hint`` may be absent on payloads from
-        agent-readiness < 3.4.3. In that case fall back to the manual
-        rubric (root.has_git / children_with_git / manifest_signals)
-        — but for new installs this branch is dead code.
+          - single repo / monorepo → ``scan_repo_tool(path)`` /
+            ``scan_monorepo_tool(path)``.
+          - workspace of independents →
+            ``scan_workspace_tool(path, children=[...])`` with the
+            ``.git`` child paths.
         """
         return json.dumps(enumerate_workspace(path), indent=2)
 
     @server.tool()
-    def check_workspace_readiness_tool(
-        path: str,
-        children_paths: list[str],
-    ) -> str:
-        """**SYNCHRONOUS workspace scan — blocks the chat for minutes.**
-        Prefer ``scan_workspace_async_tool`` for any workspace ≥ 2 repos.
+    def scan_workspace_tool(path: str, children: list[str]) -> str:
+        """Score PATH as a workspace of independent repos — headless.
 
-        Runs Coordination checks at PATH and per-repo scans on each
-        child sequentially (~30s per repo for a typical Python repo).
-        For a 10-repo workspace that is ~5 minutes of blocked chat;
-        for a 20-repo workspace, ~10 minutes. Returns the 5-pillar
-        ``WorkspaceReadinessReport`` JSON envelope when finally done.
+        Runs the Coordination pack at ``path`` and a per-repo scan on
+        each entry in ``children`` (the ``.git`` repo paths from
+        ``inspect``'s enumeration), then returns the 5-pillar
+        ``WorkspaceReadinessReport`` JSON **inline** — no browser, no
+        dashboard. The envelope carries ``overall_score``, the five
+        ``pillars`` (the fifth, Coordination, is workspace-only), the
+        per-child cards (worst-first), and a single ``top_action``
+        whose ``fix_prompt`` is the paste-ready Coordination prompt to
+        surface to the user.
 
-        Use this tool ONLY when:
-
-          - the user explicitly opted out of dashboard mode
-            (e.g. ``"don't open the dashboard, just give me the JSON"``),
-            OR
-          - running headless in CI (no human, no browser),
-            OR
-          - the workspace has 1-2 children and the user is fine waiting.
-
-        For every other multi-repo case, switch to
-        ``scan_workspace_async_tool`` — same scan engine, same
-        Coordination findings, but the chat doesn't block and prompts
-        are answered inline in the browser instead of stalling the
-        conversation.
-        """
-        try:
-            envelope = check_workspace_readiness(path, children_paths)
-        except ValueError as exc:
-            return json.dumps({"error": "invalid_input", "message": str(exc)})
-        return json.dumps(envelope, indent=2)
-
-    @server.tool()
-    def scan_workspace_tool(path: str) -> str:
-        """Score PATH as a workspace of independent repos.
-
-        Opens the dashboard wizard at ``/#/onboarding/<scan_id>`` with
-        Detected → Pick (flat grid) → Start. All children with .git
-        are pre-selected; user can deselect any before hitting Start.
+        ``children`` is the caller's classification output — the LLM
+        decided who belongs to this workspace, and the tool trusts that
+        decision (it does not re-enumerate). Pass at least one path;
+        an empty list returns an ``invalid_input`` error.
 
         For single repos call ``scan_repo_tool``; for monorepos call
         ``scan_monorepo_tool``."""
-        return json.dumps(scan_workspace(path), indent=2)
+        try:
+            envelope = check_workspace_readiness(path, children)
+        except ValueError as exc:
+            return json.dumps({"error": "invalid_input", "message": str(exc)})
+        return json.dumps(envelope, indent=2)
 
     @server.tool()
     def inspect_tool(path: str) -> str:
@@ -818,40 +487,52 @@ def serve(transport: str = "stdio") -> None:
           - ``classification.suggested_type == "monorepo"`` → call
             ``scan_monorepo_tool(path)``.
           - ``classification.suggested_type == "workspace"`` → call
-            ``scan_workspace_tool(path)``.
+            ``scan_workspace_tool(path, children=[...])`` where children
+            is the list of ``.git`` repo paths from
+            ``enumeration.repos``.
 
-        Each scan tool opens an onboarding wizard in the browser — the
-        user confirms (and may override the type) before any scan
-        starts. Returns in ~200ms for trees under ~5k directories."""
+        Each scan tool runs headlessly and returns the readiness report
+        **inline in chat** — no browser, no dashboard. Returns in
+        ~200ms for trees under ~5k directories."""
         return json.dumps(inspect(path), indent=2)
 
     @server.tool()
     def scan_repo_tool(path: str) -> str:
-        """Score PATH as a single repository — opens the dashboard wizard.
+        """Score PATH as a single repository — headless.
 
-        Returns immediately with an ``onboarding_required`` envelope and
-        a ``dashboard_url`` pointing at ``/#/onboarding/<scan_id>``. The
-        wizard has 2 steps (Detected → Start); user confirms then the
-        scan begins. Share ``dashboard_url`` verbatim with the user and
-        STOP calling tools.
+        Returns the ``ReadinessReport`` JSON **inline** (no browser, no
+        dashboard): ``overall_score``, ``pillar_scores``, every check
+        result, and the ``top_action`` pin. Follow with
+        ``list_friction_tool(path)`` to surface every paste-ready
+        ``fix_prompt``, or ``apply_top_action_tool(path)`` to land the
+        top fix.
 
-        For monorepos call ``scan_monorepo_tool`` instead; for
-        workspaces call ``scan_workspace_tool``. If you don't know,
-        call ``inspect_tool`` first."""
-        return json.dumps(scan_repo(path), indent=2)
+        Errors with an ``multi_repo_workspace`` payload if PATH actually
+        holds several repos — call ``scan_workspace_tool`` for that
+        case. For monorepos call ``scan_monorepo_tool``. If you don't
+        know, call ``inspect_tool`` first."""
+        try:
+            return json.dumps(scan_repo(path), indent=2)
+        except MultiRepoWorkspaceError as exc:
+            return json.dumps(exc.payload, indent=2)
+        except ValueError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
 
     @server.tool()
     def scan_monorepo_tool(path: str) -> str:
-        """Score PATH as a monorepo (one .git at root, many packages).
+        """Score PATH as a monorepo (one .git at root, many packages) — headless.
 
-        Opens the dashboard wizard at ``/#/onboarding/<scan_id>`` with
-        Detected → Pick (grouped by parent folder) → Start. All
-        detected sub-packages are pre-selected; user can deselect
-        before hitting Start.
+        Returns the ``ReadinessReport`` JSON **inline** (no browser, no
+        dashboard), scoring the root as a single repository. Follow with
+        ``list_friction_tool`` / ``apply_top_action_tool`` exactly as
+        for ``scan_repo_tool``.
 
         For single repos call ``scan_repo_tool``; for workspaces of
         independent repos call ``scan_workspace_tool``."""
-        return json.dumps(scan_monorepo(path), indent=2)
+        try:
+            return json.dumps(scan_monorepo(path), indent=2)
+        except ValueError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
 
     @server.tool()
     def apply_top_action_tool(path: str, run_verify: bool = True) -> str:
@@ -1010,139 +691,6 @@ def serve(transport: str = "stdio") -> None:
         """
         return json.dumps(ontology(subcmd, arguments=arguments), indent=2)
 
-    # ----- Plan 3: live-scan tools ---------------------------------------
-
-    @server.tool()
-    def scan_workspace_async_tool(
-        workspace_path: str,
-        children: list[str] | None = None,
-    ) -> str:
-        """**DEFAULT workspace scan tool — start here for any multi-repo path.**
-
-        Spawns ``agent-readiness scan-and-view`` as a detached subprocess
-        and **returns within ~2 seconds** with a JSON envelope:
-
-            {
-              "status": "started",
-              "scan_id": "<workspace_hash>",
-              "dashboard_url": "http://127.0.0.1:<port>/#/live/<scan_id>",
-              "children_total": N,
-              "eta_minutes_estimate": M,
-              ...
-            }
-
-        After this returns:
-
-          1. **Share ``dashboard_url`` with the user verbatim** so they
-             can open it in a browser. The browser shows the per-repo
-             grid, prompts queue, and findings feed updating live over
-             SSE — the user does not need to wait in chat.
-          2. **Tell the user how to exit dashboard mode** — they can
-             click *"Exit dashboard"* in the browser OR ask in chat
-             (which POSTs to the exit endpoint). The scan keeps running
-             either way.
-          3. **Stop calling tools.** Hand off. Don't poll
-             ``get_scan_status_tool`` in a loop — that's what the
-             dashboard is for. Call ``get_scan_status_tool`` **at most
-             once per chat turn**, only when the user sends a new
-             message.
-
-        Use this tool for any workspace with ≥ 2 children. Same scan
-        engine as ``check_workspace_readiness_tool`` but the chat
-        doesn't block and interactive prompts are answered in the
-        browser instead of stalling the conversation.
-
-        If a live scan already exists for ``workspace_path`` (verified
-        via daemon.pid), returns that scan's URL instead of starting a
-        new one.
-        """
-        try:
-            return json.dumps(
-                scan_workspace_async(workspace_path, children=children),
-                indent=2,
-            )
-        except (ValueError, RuntimeError) as exc:
-            return json.dumps({"error": "scan_start_failed", "message": str(exc)})
-
-    @server.tool()
-    def get_scan_status_tool(scan_id: str) -> str:
-        """Cheap, non-blocking poll of a live or completed scan.
-
-        Returns the status envelope (``status``, ``progress``,
-        ``dashboard_url``, ``sse_url``, ``snapshot_url``,
-        ``prompts_pending_count``, ``mode_exit_requested``,
-        ``overall_score``). Safe to call repeatedly — but the contract
-        is **at most once per chat turn**, not in a polling loop. The
-        dashboard already shows live progress; this tool exists so the
-        agent can briefly answer "how's it going?" when the user asks.
-
-        Read the envelope and respond conversationally:
-
-          - ``status == "completed"`` → summarise + offer to apply.
-          - ``status == "running"`` → one-liner: "X of Y repos done".
-          - ``prompts_pending_count > 0`` → tell the user to answer
-            the pending prompts in the dashboard tab.
-          - ``mode_exit_requested == True`` → the user clicked Exit
-            Dashboard; revert to chat mode for the next response.
-        """
-        try:
-            return json.dumps(get_scan_status(scan_id), indent=2)
-        except FileNotFoundError as exc:
-            return json.dumps({"error": "not_found", "message": str(exc)})
-
-    @server.tool()
-    def stop_scan_tool(scan_id: str) -> str:
-        """Stop one scan, or every running scan with ``scan_id='all'``."""
-        return json.dumps(stop_scan(scan_id), indent=2)
-
-    @server.tool()
-    def list_scans_tool() -> str:
-        """Enumerate active + recent scans across every workspace."""
-        return json.dumps(list_scans(), indent=2)
-
-    @server.tool()
-    def get_pending_intents_tool() -> str:
-        """List queued (pending) scan intents posted from the dashboard.
-
-        Use this from a watch loop: for each intent, claim_intent_tool, then
-        dispatch (start -> inspect + scan_*, stop -> stop_scan), then
-        ack_intent_tool with the outcome."""
-        return json.dumps(get_pending_intents(), indent=2)
-
-    @server.tool()
-    def claim_intent_tool(intent_id: str) -> str:
-        """Atomically claim a pending intent before executing it, so two
-        overlapping loop ticks can't double-run the same intent."""
-        return json.dumps(claim_intent(intent_id), indent=2)
-
-    @server.tool()
-    def ack_intent_tool(
-        intent_id: str, status: str, result: dict | None = None
-    ) -> str:
-        """Mark an intent done|failed after executing it. ``status`` must be
-        'done' or 'failed'; ``result`` can carry e.g.
-        {"dashboard_url": "..."}."""
-        return json.dumps(ack_intent(intent_id, status, result=result), indent=2)
-
-    @server.tool()
-    def render_workspace_report_tool(
-        workspace_path: str,
-        scan_id: str | None = None,
-        output_dir: str | None = None,
-    ) -> str:
-        """Render a scan as a portable static directory (HTML + JSON)."""
-        try:
-            return json.dumps(
-                render_workspace_report(
-                    workspace_path,
-                    scan_id=scan_id,
-                    output_dir=output_dir,
-                ),
-                indent=2,
-            )
-        except FileNotFoundError as exc:
-            return json.dumps({"error": "not_found", "message": str(exc)})
-
     if injected is not None:
         return
     if transport != "stdio":
@@ -1156,19 +704,13 @@ __all__ = [
     "check_workspace_readiness",
     "detect_workspace",
     "enumerate_workspace",
-    "get_scan_status",
     "inspect",
     "list_friction",
-    "list_scans",
     "manifest_validate",
     "ontology",
-    "render_workspace_report",
     "scan_monorepo",
     "scan_repo",
-    "scan_workspace",
-    "scan_workspace_async",
     "serve",
-    "stop_scan",
     # Bundle B (v0.6.0): gap-aware tools + ambiguity-refusing apply
     # round-trip. Re-exported from agent_readiness_mcp.gaps.
     "ask_clarification",
